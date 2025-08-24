@@ -1,0 +1,5 @@
+[package]
+name = "testing"
+
+[dependencies]
+client = { path = "../client" }
