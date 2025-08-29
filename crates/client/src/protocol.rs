@@ -3,8 +3,12 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 use tokio_tungstenite::tungstenite::Utf8Bytes;
+
+pub type Fields = HashMap<String, Value>;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Error {
     error: String,
@@ -41,13 +45,13 @@ pub enum Event {
     Added {
         collection: String,
         id: String,
-        fields: Option<Value>,
+        fields: Option<Fields>,
     },
     Changed {
         collection: String,
         id: String,
-        fields: Option<Value>,
-        cleared: Vec<String>,
+        fields: Option<Fields>,
+        cleared: Option<Vec<String>>,
     },
     Removed {
         collection: String,
@@ -100,7 +104,7 @@ pub enum Command {
     Sub {
         id: String,
         name: String,
-        params: Option<Value>,
+        params: Option<Vec<String>>,
     },
     UnSub {
         id: String,
