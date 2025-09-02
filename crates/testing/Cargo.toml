@@ -1,6 +1,0 @@
-[package]
-name = "testing"
-edition.workspace = true
-
-[dependencies]
-client = { path = "../client" }

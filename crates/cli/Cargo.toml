@@ -1,0 +1,12 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+client = { path = "../client" }
+serde_json = { workspace = true }
+serde_with = { version = "3.14.0" }
+serde = { workspace = true }
+tokio = { workspace = true }
+base64 = "0.22.1"
