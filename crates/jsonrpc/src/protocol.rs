@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, convert::TryFrom, fmt};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -31,7 +31,7 @@ impl Params {
 }
 
 // JSONRPC 2.0 Error Object (https://www.jsonrpc.org/specification#error_object)
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct Error {
     code: i64,
     message: String,
@@ -43,16 +43,22 @@ impl fmt::Display for Error {
         write!(
             f,
             "code: {} message: {} data: {:?}",
-            self.code, self.message, self.data
+            &self.code, &self.message, &self.data
         )
     }
 }
 
 // --- Requests ---
 
+#[derive(Serialize, Debug)]
+pub enum Request {
+    RpcRequest(RpcRequest),
+    Notification(Notification),
+}
+
 // JSONRPC 2.0 Request Object (https://www.jsonrpc.org/specification#request_object)
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Request {
+#[derive(Serialize, Debug)]
+pub struct RpcRequest {
     jsonrpc: String, // This should always be 2.0
     id: String,
     method: String,
@@ -73,12 +79,12 @@ pub struct Notification {
 // --- Responses ---
 
 // JSONRPC 2.0 Response Object (https://www.jsonrpc.org/specification#response_object)
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
-pub enum RpcResponse<R> {
+pub enum RpcResponse<T> {
     Ok {
         jsonrpc: String,
-        result: R,
+        result: T,
         id: String,
     },
     Err {
@@ -89,9 +95,8 @@ pub enum RpcResponse<R> {
 }
 
 // Response wrapper for ease of use.
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(untagged)]
-pub enum Response<R> {
-    Response(RpcResponse<R>),
+#[derive(Deserialize, Debug)]
+pub enum Response<T> {
+    RpcResponse(RpcResponse<T>),
     Notification(Notification),
 }
