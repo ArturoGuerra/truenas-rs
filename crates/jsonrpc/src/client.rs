@@ -1,5 +1,4 @@
 use crate::error::Error;
-use crate::protocol::Params;
 use serde::de::DeserializeOwned;
 
 #[derive(Clone, Debug)]
@@ -22,16 +21,17 @@ where
     result: T,
 }
 
+// TODO: Implement a trait for parameters.
 trait Client {
     async fn request<T, P>(&self, method: impl AsRef<str>, params: P) -> Result<Response<T>, Error>
     where
         T: DeserializeOwned;
 
     // Sends a notification
-    async fn notify(&self, method: impl AsRef<str>, params: Params) -> Result<(), Error>;
+    async fn notification<P>(&self, method: impl AsRef<str>, params: P) -> Result<(), Error>;
 
     // Subscribes to a notification
-    async fn subscribe<T>(&self, method: impl AsRef<str>) -> Result<Subscriber<T>, Error>
+    async fn subscribe_to_method<T>(&self, method: impl AsRef<str>) -> Result<Subscriber<T>, Error>
     where
         T: DeserializeOwned;
 }

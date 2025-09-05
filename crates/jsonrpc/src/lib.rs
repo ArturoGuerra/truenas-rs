@@ -1,3 +1,4 @@
 pub mod client;
 pub mod error;
-pub mod protocol;
+pub(crate) mod io;
+pub(crate) mod state;
