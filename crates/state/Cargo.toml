@@ -1,11 +1,13 @@
 [package]
-name = "jsonrpc"
+name = "state"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+io = { path = "../io" }
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
-tokio = { workspace = true }
+bytes = { workspace = true }
