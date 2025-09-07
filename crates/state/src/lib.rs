@@ -33,8 +33,8 @@ pub(crate) struct StateManager {
 
 #[derive(thiserror::Error, Debug)]
 pub enum TaskError {
-    #[error("channel send error: {0}")]
-    Send(&'static str),
+    #[error("channel send error")]
+    Send,
     #[error("utf8: {0}")]
     UTF8(std::str::Utf8Error),
     #[error("serde: {0}")]
@@ -67,7 +67,7 @@ impl StateManager {
                             id: resp.id,
                             result: JsonSlice::from_raw(bytes.clone(), root, resp.result),
                         }))
-                        .map_err(|_| TaskError::Send("rpc response")),
+                        .map_err(|_| TaskError::Send),
                     None => Ok(()),
                 },
                 Response::RpcError(err) => match err.id {
@@ -79,7 +79,7 @@ impl StateManager {
                                 message: err.error.message.to_string(),
                                 data: None,
                             }))
-                            .map_err(|_| TaskError::Send("rpc error")),
+                            .map_err(|_| TaskError::Send),
                         None => Ok(()),
                     },
                     None => {
@@ -121,9 +121,25 @@ impl StateManager {
                 self.pending_calls.insert(id, reply);
                 self.to_write_tx
                     .send(WireOut::Send(payload))
-                    .map_err(|_| TaskError::Send("io send"))
+                    .map_err(|_| TaskError::Send)
             }
-            Cmd::Notification { method, params } => Ok(()),
+            Cmd::Notification { method, params } => {
+                let params = params
+                    .map(|p| p.into_raw())
+                    .transpose()
+                    .map_err(TaskError::Serde)?;
+                let payload = protocol::Notification {
+                    jsonrpc: JSONRPC_VERSION,
+                    method: method.as_ref(),
+                    params: params.as_deref(),
+                };
+
+                let payload = serde_json::to_vec(&payload).map(Bytes::from).unwrap();
+
+                self.to_write_tx
+                    .send(WireOut::Send(payload))
+                    .map_err(|_| TaskError::Send)
+            }
             Cmd::Subscribe { method, ready } => Ok(()),
             Cmd::Unsubscribe { id } => Ok(()),
             Cmd::Close => Ok(()),

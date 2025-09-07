@@ -103,13 +103,52 @@ impl AsRef<str> for MethodName {
     }
 }
 
+#[derive(Debug)]
+pub struct ArrayParams(Vec<Value>);
+impl Default for ArrayParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl ArrayParams {
+    pub fn new() -> Self {
+        Self(vec![])
+    }
+
+    pub fn insert<T: Serialize>(&mut self, v: T) -> std::result::Result<(), serde_json::Error> {
+        self.0.push(serde_json::to_value(&v)?);
+        Ok(())
+    }
+}
+
+pub struct ObjectParams(Map<String, Value>);
+impl Default for ObjectParams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl ObjectParams {
+    pub fn new() -> Self {
+        Self(Map::new())
+    }
+
+    pub fn insert<T: Serialize>(
+        &mut self,
+        k: impl Into<String>,
+        v: T,
+    ) -> std::result::Result<(), serde_json::Error> {
+        self.0.insert(k.into(), serde_json::to_value(&v)?);
+        Ok(())
+    }
+}
+
 // ---- Public Data structures used in the messaging layer. ----
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Params {
-    Positional(Vec<Value>),
-    Named(Map<String, Value>),
+    Array(Vec<Value>),
+    Object(Map<String, Value>),
 }
 
 impl Params {
@@ -120,6 +159,55 @@ impl Params {
 
 pub trait IntoParams {
     fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError>;
+}
+
+impl IntoParams for Params {
+    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+        Ok(Some(self))
+    }
+}
+impl IntoParams for () {
+    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+        Ok(None)
+    }
+}
+
+impl IntoParams for Option<Params> {
+    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+        Ok(self)
+    }
+}
+
+impl IntoParams for Value {
+    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+        Ok(Some(match self {
+            Value::Array(a) => Params::Array(a),
+            Value::Object(o) => Params::Object(o),
+            _ => return Err(ParamConvError::NotArrayOrObject),
+        }))
+    }
+}
+
+impl IntoParams for ArrayParams {
+    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+        Ok(Some(Params::Array(self.0)))
+    }
+}
+
+impl IntoParams for ObjectParams {
+    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+        Ok(Some(Params::Object(self.0)))
+    }
+}
+
+impl<T: Serialize> IntoParams for &T {
+    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+        match serde_json::to_value(self).map_err(ParamConvError::Serialization)? {
+            Value::Array(a) => Ok(Some(Params::Array(a))),
+            Value::Object(o) => Ok(Some(Params::Object(o))),
+            _ => Err(ParamConvError::NotArrayOrObject),
+        }
+    }
 }
 
 #[derive(Debug)]
