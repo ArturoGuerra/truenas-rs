@@ -8,15 +8,18 @@ use std::ops::Range;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
+use std::borrow::Borrow;
+use tokio::sync::{broadcast, oneshot};
+
 pub use serde_json::{Map, Value};
-use tokio::sync::{mpsc, oneshot};
 
 // ---- Type aliases ----
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type RpcReply = oneshot::Sender<Result<RpcResultPayload>>;
-pub type SubscriptionReady = oneshot::Sender<Result<()>>;
-pub type SubscriptionSender = mpsc::UnboundedSender<Result<()>>;
+pub type SubscriptionReady = oneshot::Sender<SubscriptionRecv>;
+pub type SubscriptionSender = broadcast::Sender<SubscriptionPayload>;
+pub type SubscriptionRecv = broadcast::Receiver<SubscriptionPayload>;
 
 // ---- Error definitions ----
 #[derive(thiserror::Error, Debug)]
@@ -25,10 +28,10 @@ pub enum Error {
     Transport(String),
     #[error("protocol error code={code} message={message}")]
     Protocol {
-        id: RequestId,
+        id: RequestIdBuf,
         code: i64,
         message: String,
-        data: Option<Value>,
+        data: Option<Box<RawValue>>,
     },
     #[error("timeout")]
     Timeout,
@@ -48,60 +51,91 @@ pub enum ParamConvError {
 * ---- Data types used in the messaging layer ----
 */
 
+#[derive(Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct RequestId(str);
+impl RequestId {
+    fn new(s: &str) -> &RequestId {
+        unsafe { &*(s as *const str as *const RequestId) }
+    }
+}
+impl ToOwned for RequestId {
+    type Owned = RequestIdBuf;
+    fn to_owned(&self) -> RequestIdBuf {
+        RequestIdBuf(self.0.to_owned())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 #[repr(transparent)]
-pub struct RequestId(String);
-
-impl From<&str> for RequestId {
-    fn from(s: &str) -> Self {
-        Self(s.to_owned())
+pub struct RequestIdBuf(String);
+impl RequestIdBuf {
+    pub fn new(s: String) -> RequestIdBuf {
+        RequestIdBuf(s)
+    }
+}
+impl Borrow<RequestId> for RequestIdBuf {
+    fn borrow(&self) -> &RequestId {
+        RequestId::new(&self.0)
+    }
+}
+impl AsRef<RequestId> for RequestIdBuf {
+    fn as_ref(&self) -> &RequestId {
+        RequestId::new(&self.0)
+    }
+}
+impl From<String> for RequestIdBuf {
+    fn from(s: String) -> RequestIdBuf {
+        RequestIdBuf(s)
     }
 }
 
-impl From<String> for RequestId {
-    fn from(s: String) -> Self {
-        Self(s)
+#[derive(Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct MethodId(str);
+impl MethodId {
+    fn new(s: &str) -> &MethodId {
+        unsafe { &*(s as *const str as *const MethodId) }
+    }
+}
+impl ToOwned for MethodId {
+    type Owned = MethodIdBuf;
+    fn to_owned(&self) -> MethodIdBuf {
+        MethodIdBuf(self.0.to_owned())
     }
 }
 
-impl From<RequestId> for String {
-    fn from(r: RequestId) -> Self {
-        r.0
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct MethodIdBuf(String);
+impl MethodIdBuf {
+    pub fn new(s: String) -> MethodIdBuf {
+        MethodIdBuf(s)
+    }
+}
+impl Borrow<MethodId> for MethodIdBuf {
+    fn borrow(&self) -> &MethodId {
+        MethodId::new(&self.0)
+    }
+}
+impl AsRef<MethodId> for MethodIdBuf {
+    fn as_ref(&self) -> &MethodId {
+        MethodId::new(&self.0)
+    }
+}
+impl From<String> for MethodIdBuf {
+    fn from(s: String) -> MethodIdBuf {
+        MethodIdBuf(s)
     }
 }
 
 /*
 *
 */
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct MethodName(String);
-impl From<&str> for MethodName {
-    fn from(s: &str) -> Self {
-        Self(s.to_owned())
-    }
-}
-
-impl From<String> for MethodName {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<MethodName> for String {
-    fn from(r: MethodName) -> Self {
-        r.0
-    }
-}
-
-impl AsRef<str> for MethodName {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
 
 #[derive(Debug)]
 pub struct ArrayParams(Vec<Value>);
@@ -211,43 +245,34 @@ impl<T: Serialize> IntoParams for &T {
 }
 
 #[derive(Debug)]
-pub enum WireIn {
-    Recv(Bytes),
-    Closed,
-}
-
-#[derive(Debug)]
-pub enum WireOut {
-    Send(Bytes),
-    Close,
-}
-
-#[derive(Debug)]
 pub struct RpcResultPayload {
-    pub id: RequestId,
+    pub id: RequestIdBuf,
     pub result: JsonSlice,
 }
 
+#[derive(Debug)]
+pub struct SubscriptionPayload(pub Option<JsonSlice>);
+
 pub enum Cmd {
     Call {
-        id: RequestId,
-        method: MethodName,
+        id: RequestIdBuf,
+        method: MethodIdBuf,
         params: Option<Params>,
         reply: RpcReply,
     },
 
     Notification {
-        method: MethodName,
+        method: MethodIdBuf,
         params: Option<Params>,
     },
 
     Subscribe {
-        method: MethodName,
+        method: MethodIdBuf,
         ready: SubscriptionReady,
     },
 
     Unsubscribe {
-        id: MethodName,
+        method: MethodIdBuf,
     },
     Close,
 }

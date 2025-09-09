@@ -1,6 +1,7 @@
-use crate::types::RequestId;
+use crate::types::{MethodId, RequestId};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use std::borrow::Cow;
 
 // Spec: https://www.jsonrpc.org/specification
 
@@ -8,8 +9,8 @@ use serde_json::value::RawValue;
 #[derive(Serialize, Debug)]
 pub struct RpcRequest<'a> {
     pub jsonrpc: &'a str,
-    pub id: RequestId,
-    pub method: &'a str,
+    pub id: Cow<'a, RequestId>,
+    pub method: Cow<'a, MethodId>,
     pub params: Option<&'a RawValue>,
 }
 
@@ -18,7 +19,7 @@ pub struct RpcRequest<'a> {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Notification<'a> {
     pub jsonrpc: &'a str, // This should always be 2.0
-    pub method: &'a str,
+    pub method: Cow<'a, MethodId>,
     pub params: Option<&'a RawValue>,
 }
 
@@ -26,7 +27,7 @@ pub struct Notification<'a> {
 pub struct RpcResponse<'a> {
     pub jsonrpc: &'a str,
     pub result: &'a RawValue,
-    pub id: RequestId,
+    pub id: Cow<'a, RequestId>,
 }
 
 // JSONRPC 2.0 Error Object (https://www.jsonrpc.org/specification#error_object)
@@ -34,15 +35,17 @@ pub struct RpcResponse<'a> {
 pub struct RpcError<'a> {
     pub jsonrpc: &'a str,
     pub error: Error<'a>,
-    pub id: Option<RequestId>,
+    pub id: Option<Cow<'a, RequestId>>,
 }
 
 // JSONRPC 2.0 Error Object (https://www.jsonrpc.org/specification#error_object)
 #[derive(Deserialize, Clone, Debug)]
 pub struct Error<'a> {
     pub code: i64,
-    pub message: &'a str,
-    pub data: &'a RawValue,
+    pub method: Cow<'a, MethodId>,
+    pub message: Cow<'a, str>,
+    #[serde(borrow)]
+    pub data: Option<Cow<'a, RawValue>>,
 }
 
 #[derive(Deserialize, Debug)]

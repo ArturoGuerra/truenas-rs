@@ -1,0 +1,10 @@
+[package]
+name = "core"
+version.workspace = true
+edition.workspace = true
+
+
+[dependencies]
+state = { path = "../state" }
+thiserror = { workspace = true }
+bytes = { workspace = true }

@@ -1,28 +1,33 @@
 /* Handles the state of the socket, http connections etc, keeping track of requests and responses
 * allowing for a seamless calling convention for methods */
 
+use crate::core::{WireIn, WireOut};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use std::borrow::Cow;
 use std::collections::HashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 pub mod protocol;
 pub mod types;
 
 const JSONRPC_VERSION: &str = "2.0";
 
-pub(crate) use types::{Cmd, RpcResultPayload, WireIn, WireOut};
+pub(crate) use types::{Cmd, RpcResultPayload};
 pub use types::{
-    Error, IntoParams, JsonSlice, MethodName, ParamConvError, Params, RequestId, RpcReply,
+    Error, IntoParams, JsonSlice, MethodId, MethodIdBuf, ParamConvError, Params, RequestId,
+    RpcReply,
 };
 
 use protocol::Response;
 
-pub(crate) struct StateManager {
-    pending_calls: HashMap<RequestId, RpcReply>,
+use crate::types::{RequestIdBuf, SubscriptionPayload, SubscriptionSender};
 
-    method_subscriptions: HashMap<MethodName, mpsc::UnboundedSender<()>>,
+pub(crate) struct State {
+    pending_calls: HashMap<RequestIdBuf, RpcReply>,
+
+    method_subscriptions: HashMap<MethodIdBuf, SubscriptionSender>,
 
     cmd_rx: mpsc::UnboundedReceiver<Cmd>,
 
@@ -41,7 +46,7 @@ pub enum TaskError {
     Serde(serde_json::Error),
 }
 
-impl StateManager {
+impl State {
     pub fn new(
         cmd_rx: mpsc::UnboundedReceiver<Cmd>,
         to_write_tx: mpsc::UnboundedSender<WireOut>,
@@ -61,23 +66,23 @@ impl StateManager {
         let root = std::str::from_utf8(&bytes).map_err(TaskError::UTF8)?;
         match serde_json::from_slice::<Response>(&bytes) {
             Ok(resp) => match resp {
-                Response::RpcResponse(resp) => match self.pending_calls.remove(&resp.id) {
+                Response::RpcResponse(resp) => match self.pending_calls.remove(resp.id.as_ref()) {
                     Some(sender) => sender
                         .send(Ok(RpcResultPayload {
-                            id: resp.id,
+                            id: resp.id.into_owned(),
                             result: JsonSlice::from_raw(bytes.clone(), root, resp.result),
                         }))
                         .map_err(|_| TaskError::Send),
                     None => Ok(()),
                 },
                 Response::RpcError(err) => match err.id {
-                    Some(id) => match self.pending_calls.remove(&id) {
+                    Some(id) => match self.pending_calls.remove(id.as_ref()) {
                         Some(sender) => sender
                             .send(Err(Error::Protocol {
-                                id,
+                                id: id.into_owned(),
                                 code: err.error.code,
                                 message: err.error.message.to_string(),
-                                data: None,
+                                data: err.error.data.map(|v: Cow<'_, RawValue>| v.into_owned()),
                             }))
                             .map_err(|_| TaskError::Send),
                         None => Ok(()),
@@ -87,7 +92,23 @@ impl StateManager {
                         Ok(())
                     }
                 },
-                _ => Ok(()),
+                Response::Notification(notification) => match self
+                    .method_subscriptions
+                    .get_mut(notification.method.as_ref())
+                {
+                    Some(subscription) => {
+                        let payload = SubscriptionPayload(
+                            notification
+                                .params
+                                .map(|params| JsonSlice::from_raw(bytes.clone(), root, params)),
+                        );
+                        subscription
+                            .send(payload)
+                            .map(|_| ())
+                            .map_err(|_| TaskError::Send)
+                    }
+                    None => Ok(()),
+                },
             },
             Err(err) => {
                 println!("error parsing data: {:?}", err);
@@ -96,6 +117,7 @@ impl StateManager {
         }
     }
 
+    #[inline]
     async fn handle_cmd(&mut self, cmd: Cmd) -> Result<(), TaskError> {
         match cmd {
             Cmd::Call {
@@ -111,8 +133,8 @@ impl StateManager {
 
                 let payload = protocol::RpcRequest {
                     jsonrpc: JSONRPC_VERSION,
-                    id: id.clone(),
-                    method: method.as_ref(),
+                    id: Cow::Borrowed(id.as_ref()),
+                    method: Cow::Borrowed(method.as_ref()),
                     params: params.as_deref(),
                 };
 
@@ -130,7 +152,7 @@ impl StateManager {
                     .map_err(TaskError::Serde)?;
                 let payload = protocol::Notification {
                     jsonrpc: JSONRPC_VERSION,
-                    method: method.as_ref(),
+                    method: Cow::Borrowed(method.as_ref()),
                     params: params.as_deref(),
                 };
 
@@ -140,8 +162,23 @@ impl StateManager {
                     .send(WireOut::Send(payload))
                     .map_err(|_| TaskError::Send)
             }
-            Cmd::Subscribe { method, ready } => Ok(()),
-            Cmd::Unsubscribe { id } => Ok(()),
+            Cmd::Subscribe { method, ready } => {
+                match self.method_subscriptions.get_mut(method.as_ref()) {
+                    Some(subscription) => {
+                        let subcriber = subscription.subscribe();
+                        ready.send(subcriber).map_err(|_| TaskError::Send)
+                    }
+                    None => Ok(()),
+                }
+            }
+            Cmd::Unsubscribe { method } => {
+                if let Some(subscription) = self.method_subscriptions.get(method.as_ref())
+                    && subscription.receiver_count() == 0
+                {
+                    self.method_subscriptions.remove(method.as_ref());
+                };
+                Ok(())
+            }
             Cmd::Close => Ok(()),
         }
     }
