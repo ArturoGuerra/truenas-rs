@@ -1,8 +1,9 @@
 [workspace]
-members = ["crates/*"]
+members = ["truenas", "truenas-cli"]
 resolver = "3"
 
 [workspace.package]
+name = "truenas-rs"
 version = "0.0.1"
 edition = "2024"
 

@@ -3,48 +3,41 @@
 *  state loop to improve ergonomics.
 */
 
-use std::ops::Range;
-
+use crate::error::Error;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::value::RawValue;
+use serde_json::value::{Map, RawValue, Value};
 use std::borrow::Borrow;
-use tokio::sync::{broadcast, oneshot};
-
-pub use serde_json::{Map, Value};
+use std::ops::Range;
+use tokio::sync::{
+    broadcast,
+    mpsc::{self, channel},
+    oneshot,
+};
+use uuid::Uuid;
 
 // ---- Type aliases ----
 
 pub type Result<T> = std::result::Result<T, Error>;
+pub type CmdTx = mpsc::UnboundedSender<Cmd>;
+pub type CmdRx = mpsc::UnboundedReceiver<Cmd>;
 pub type RpcReply = oneshot::Sender<Result<RpcResultPayload>>;
 pub type SubscriptionReady = oneshot::Sender<SubscriptionRecv>;
 pub type SubscriptionSender = broadcast::Sender<SubscriptionPayload>;
 pub type SubscriptionRecv = broadcast::Receiver<SubscriptionPayload>;
 
 // ---- Error definitions ----
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("transport: {0}")]
-    Transport(String),
-    #[error("protocol error code={code} message={message}")]
-    Protocol {
-        id: RequestIdBuf,
-        code: i64,
-        message: String,
-        data: Option<Box<RawValue>>,
-    },
-    #[error("timeout")]
-    Timeout,
-    #[error("closed")]
+
+#[derive(Debug)]
+pub enum WireIn {
+    Recv(Bytes),
     Closed,
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum ParamConvError {
-    #[error("params most be an array (positional) or object (named), got scaler")]
-    NotArrayOrObject,
-    #[error("serialization failure: {0}")]
-    Serialization(serde_json::Error),
+#[derive(Debug)]
+pub enum WireOut {
+    Send(Bytes),
+    Close,
 }
 
 /*
@@ -89,6 +82,11 @@ impl AsRef<RequestId> for RequestIdBuf {
 impl From<String> for RequestIdBuf {
     fn from(s: String) -> RequestIdBuf {
         RequestIdBuf(s)
+    }
+}
+impl From<Uuid> for RequestIdBuf {
+    fn from(uuid: Uuid) -> RequestIdBuf {
+        RequestIdBuf(uuid.to_string())
     }
 }
 
@@ -192,54 +190,54 @@ impl Params {
 }
 
 pub trait IntoParams {
-    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError>;
+    fn into_params(self) -> std::result::Result<Option<Params>, Error>;
 }
 
 impl IntoParams for Params {
-    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
         Ok(Some(self))
     }
 }
 impl IntoParams for () {
-    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
         Ok(None)
     }
 }
 
 impl IntoParams for Option<Params> {
-    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
         Ok(self)
     }
 }
 
 impl IntoParams for Value {
-    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
         Ok(Some(match self {
             Value::Array(a) => Params::Array(a),
             Value::Object(o) => Params::Object(o),
-            _ => return Err(ParamConvError::NotArrayOrObject),
+            _ => return Err(Error::NotArrayOrObject),
         }))
     }
 }
 
 impl IntoParams for ArrayParams {
-    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
         Ok(Some(Params::Array(self.0)))
     }
 }
 
 impl IntoParams for ObjectParams {
-    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
+    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
         Ok(Some(Params::Object(self.0)))
     }
 }
 
 impl<T: Serialize> IntoParams for &T {
-    fn into_params(self) -> std::result::Result<Option<Params>, ParamConvError> {
-        match serde_json::to_value(self).map_err(ParamConvError::Serialization)? {
+    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
+        match serde_json::to_value(self).map_err(Error::Serde)? {
             Value::Array(a) => Ok(Some(Params::Array(a))),
             Value::Object(o) => Ok(Some(Params::Object(o))),
-            _ => Err(ParamConvError::NotArrayOrObject),
+            _ => Err(Error::NotArrayOrObject),
         }
     }
 }
@@ -274,7 +272,6 @@ pub enum Cmd {
     Unsubscribe {
         method: MethodIdBuf,
     },
-    Close,
 }
 
 #[derive(Debug)]
@@ -306,7 +303,17 @@ impl JsonSlice {
         self.buf.slice(self.range)
     }
 
-    pub fn decode<T: DeserializeOwned>(self) -> serde_json::Result<T> {
+    pub fn deserialize<'de, T>(&'de self) -> serde_json::Result<T>
+    where
+        T: Deserialize<'de>,
+    {
+        serde_json::from_slice(self.as_bytes())
+    }
+
+    pub fn deserialize_owned<T>(self) -> serde_json::Result<T>
+    where
+        T: DeserializeOwned,
+    {
         serde_json::from_slice(&self.into_bytes())
     }
 }

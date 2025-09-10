@@ -1,7 +1,6 @@
 /* Handles the state of the socket, http connections etc, keeping track of requests and responses
 * allowing for a seamless calling convention for methods */
 
-use crate::core::{WireIn, WireOut};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -9,27 +8,21 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-pub mod protocol;
-pub mod types;
-
 const JSONRPC_VERSION: &str = "2.0";
 
-pub(crate) use types::{Cmd, RpcResultPayload};
-pub use types::{
-    Error, IntoParams, JsonSlice, MethodId, MethodIdBuf, ParamConvError, Params, RequestId,
-    RpcReply,
+use crate::error::Error;
+use crate::protocol::{self, Response};
+use crate::types::{
+    Cmd, CmdRx, IntoParams, JsonSlice, MethodId, MethodIdBuf, Params, RequestId, RequestIdBuf,
+    RpcReply, RpcResultPayload, SubscriptionPayload, SubscriptionSender, WireIn, WireOut,
 };
-
-use protocol::Response;
-
-use crate::types::{RequestIdBuf, SubscriptionPayload, SubscriptionSender};
 
 pub(crate) struct State {
     pending_calls: HashMap<RequestIdBuf, RpcReply>,
 
     method_subscriptions: HashMap<MethodIdBuf, SubscriptionSender>,
 
-    cmd_rx: mpsc::UnboundedReceiver<Cmd>,
+    cmd_rx: CmdRx,
 
     to_write_tx: mpsc::UnboundedSender<WireOut>,
 
@@ -40,10 +33,10 @@ pub(crate) struct State {
 pub enum TaskError {
     #[error("channel send error")]
     Send,
-    #[error("utf8: {0}")]
-    UTF8(std::str::Utf8Error),
-    #[error("serde: {0}")]
-    Serde(serde_json::Error),
+    #[error(transparent)]
+    Utf8(#[from] std::str::Utf8Error),
+    #[error(transparent)]
+    Serde(#[from] serde_json::Error),
 }
 
 impl State {
@@ -63,7 +56,7 @@ impl State {
 
     #[inline]
     async fn handle_read(&mut self, bytes: Bytes) -> Result<(), TaskError> {
-        let root = std::str::from_utf8(&bytes).map_err(TaskError::UTF8)?;
+        let root = std::str::from_utf8(&bytes).map_err(TaskError::Utf8)?;
         match serde_json::from_slice::<Response>(&bytes) {
             Ok(resp) => match resp {
                 Response::RpcResponse(resp) => match self.pending_calls.remove(resp.id.as_ref()) {
@@ -179,7 +172,6 @@ impl State {
                 };
                 Ok(())
             }
-            Cmd::Close => Ok(()),
         }
     }
 
