@@ -14,7 +14,8 @@ use crate::error::Error;
 use crate::protocol::{self, Response};
 use crate::types::{
     Cmd, CmdRx, IntoParams, JsonSlice, MethodId, MethodIdBuf, Params, RequestId, RequestIdBuf,
-    RpcReply, RpcResultPayload, SubscriptionPayload, SubscriptionSender, WireIn, WireOut,
+    RpcReply, RpcResultPayload, SubscriptionPayload, SubscriptionSender, WireIn, WireInRx, WireOut,
+    WireOutTx,
 };
 
 pub(crate) struct State {
@@ -24,9 +25,9 @@ pub(crate) struct State {
 
     cmd_rx: CmdRx,
 
-    to_write_tx: mpsc::UnboundedSender<WireOut>,
+    to_write_tx: WireOutTx,
 
-    from_read_rx: mpsc::UnboundedReceiver<WireIn>,
+    from_read_rx: WireInRx,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -184,6 +185,8 @@ impl State {
                 Some(read) = self.from_read_rx.recv() => {
                     match read {
                         WireIn::Recv(bytes) => self.handle_read(bytes).await?,
+                        WireIn::Ping => {},
+                        WireIn::Pong => {},
                         WireIn::Closed => {
 
                         },

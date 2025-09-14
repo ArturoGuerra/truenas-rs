@@ -21,6 +21,10 @@ use uuid::Uuid;
 pub type Result<T> = std::result::Result<T, Error>;
 pub type CmdTx = mpsc::UnboundedSender<Cmd>;
 pub type CmdRx = mpsc::UnboundedReceiver<Cmd>;
+pub type WireInTx = mpsc::UnboundedSender<WireIn>;
+pub type WireInRx = mpsc::UnboundedReceiver<WireIn>;
+pub type WireOutTx = mpsc::UnboundedSender<WireOut>;
+pub type WireOutRx = mpsc::UnboundedReceiver<WireOut>;
 pub type RpcReply = oneshot::Sender<Result<RpcResultPayload>>;
 pub type SubscriptionReady = oneshot::Sender<SubscriptionRecv>;
 pub type SubscriptionSender = broadcast::Sender<SubscriptionPayload>;
@@ -31,12 +35,16 @@ pub type SubscriptionRecv = broadcast::Receiver<SubscriptionPayload>;
 #[derive(Debug)]
 pub enum WireIn {
     Recv(Bytes),
+    Ping,
+    Pong,
     Closed,
 }
 
 #[derive(Debug)]
 pub enum WireOut {
     Send(Bytes),
+    Ping,
+    Pong,
     Close,
 }
 
