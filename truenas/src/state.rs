@@ -2,20 +2,15 @@
 * allowing for a seamless calling convention for methods */
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use tokio::sync::{broadcast, mpsc, oneshot};
-
-const JSONRPC_VERSION: &str = "2.0";
 
 use crate::error::Error;
-use crate::protocol::{self, Response};
+use crate::protocol::{self, Response, ResponseAny, RpcResponse};
 use crate::types::{
-    Cmd, CmdRx, IntoParams, JsonSlice, MethodId, MethodIdBuf, Params, RequestId, RequestIdBuf,
-    RpcReply, RpcResultPayload, SubscriptionPayload, SubscriptionSender, WireIn, WireInRx, WireOut,
-    WireOutTx,
+    Cmd, CmdRx, JsonRpcVer, JsonSlice, MethodIdBuf, RequestIdBuf, RpcReply, RpcResultPayload,
+    SubscriptionPayload, SubscriptionSender, WireIn, WireInRx, WireOut, WireOutTx,
 };
 
 pub(crate) struct State {
@@ -41,11 +36,7 @@ pub enum TaskError {
 }
 
 impl State {
-    pub fn new(
-        cmd_rx: mpsc::UnboundedReceiver<Cmd>,
-        to_write_tx: mpsc::UnboundedSender<WireOut>,
-        from_read_rx: mpsc::UnboundedReceiver<WireIn>,
-    ) -> Self {
+    pub fn new(cmd_rx: CmdRx, to_write_tx: WireOutTx, from_read_rx: WireInRx) -> Self {
         Self {
             pending_calls: HashMap::new(),
             method_subscriptions: HashMap::new(),
@@ -57,9 +48,12 @@ impl State {
 
     #[inline]
     async fn handle_read(&mut self, bytes: Bytes) -> Result<(), TaskError> {
+        println!("Handling read!");
+        println!("Pending calls: {:?}", &self.pending_calls);
+
         let root = std::str::from_utf8(&bytes).map_err(TaskError::Utf8)?;
-        match serde_json::from_slice::<Response>(&bytes) {
-            Ok(resp) => match resp {
+        match serde_json::from_slice::<ResponseAny>(&bytes).map(Response::try_from) {
+            Ok(Ok(resp)) => match resp {
                 Response::RpcResponse(resp) => match self.pending_calls.remove(resp.id.as_ref()) {
                     Some(sender) => sender
                         .send(Ok(RpcResultPayload {
@@ -69,22 +63,16 @@ impl State {
                         .map_err(|_| TaskError::Send),
                     None => Ok(()),
                 },
-                Response::RpcError(err) => match err.id {
-                    Some(id) => match self.pending_calls.remove(id.as_ref()) {
-                        Some(sender) => sender
-                            .send(Err(Error::Protocol {
-                                id: id.into_owned(),
-                                code: err.error.code,
-                                message: err.error.message.to_string(),
-                                data: err.error.data.map(|v: Cow<'_, RawValue>| v.into_owned()),
-                            }))
-                            .map_err(|_| TaskError::Send),
-                        None => Ok(()),
-                    },
-                    None => {
-                        println!("notification error: {:?}", &err);
-                        Ok(())
-                    }
+                Response::RpcError(err) => match self.pending_calls.remove(err.id.as_ref()) {
+                    Some(sender) => sender
+                        .send(Err(Error::Protocol {
+                            id: err.id.into_owned(),
+                            code: err.error.code,
+                            message: err.error.message.to_string(),
+                            data: err.error.data.map(|v: Cow<'_, RawValue>| v.into_owned()),
+                        }))
+                        .map_err(|_| TaskError::Send),
+                    None => Ok(()),
                 },
                 Response::Notification(notification) => match self
                     .method_subscriptions
@@ -104,7 +92,7 @@ impl State {
                     None => Ok(()),
                 },
             },
-            Err(err) => {
+            Err(err) | Ok(Err(err)) => {
                 println!("error parsing data: {:?}", err);
                 Ok(())
             }
@@ -113,6 +101,7 @@ impl State {
 
     #[inline]
     async fn handle_cmd(&mut self, cmd: Cmd) -> Result<(), TaskError> {
+        println!("Handing cmd");
         match cmd {
             Cmd::Call {
                 id,
@@ -126,13 +115,15 @@ impl State {
                     .map_err(TaskError::Serde)?;
 
                 let payload = protocol::RpcRequest {
-                    jsonrpc: JSONRPC_VERSION,
+                    jsonrpc: JsonRpcVer,
                     id: Cow::Borrowed(id.as_ref()),
                     method: Cow::Borrowed(method.as_ref()),
                     params: params.as_deref(),
                 };
 
-                let payload = serde_json::to_vec(&payload).map(Bytes::from).unwrap();
+                let payload = serde_json::to_vec(&payload)
+                    .map(Bytes::from)
+                    .map_err(TaskError::Serde)?;
 
                 self.pending_calls.insert(id, reply);
                 self.to_write_tx
@@ -145,12 +136,14 @@ impl State {
                     .transpose()
                     .map_err(TaskError::Serde)?;
                 let payload = protocol::Notification {
-                    jsonrpc: JSONRPC_VERSION,
+                    jsonrpc: JsonRpcVer,
                     method: Cow::Borrowed(method.as_ref()),
                     params: params.as_deref(),
                 };
 
-                let payload = serde_json::to_vec(&payload).map(Bytes::from).unwrap();
+                let payload = serde_json::to_vec(&payload)
+                    .map(Bytes::from)
+                    .map_err(TaskError::Serde)?;
 
                 self.to_write_tx
                     .send(WireOut::Send(payload))
@@ -177,6 +170,7 @@ impl State {
     }
 
     pub(crate) async fn task(&mut self) -> Result<(), TaskError> {
+        println!("started state task");
         loop {
             tokio::select! {
                 // main thread -> worker (here)

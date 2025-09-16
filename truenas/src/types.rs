@@ -5,16 +5,15 @@
 
 use crate::error::Error;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::value::{Map, RawValue, Value};
 use std::borrow::Borrow;
 use std::ops::Range;
-use tokio::sync::{
-    broadcast,
-    mpsc::{self, channel},
-    oneshot,
-};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
+
+/// String constant for the JSON-RPC version.
+pub const JSONRPC_VERSION: &str = "2.0";
 
 // ---- Type aliases ----
 
@@ -30,7 +29,9 @@ pub type SubscriptionReady = oneshot::Sender<SubscriptionRecv>;
 pub type SubscriptionSender = broadcast::Sender<SubscriptionPayload>;
 pub type SubscriptionRecv = broadcast::Receiver<SubscriptionPayload>;
 
-// ---- Error definitions ----
+/*
+* ----  ----
+*/
 
 #[derive(Debug)]
 pub enum WireIn {
@@ -49,7 +50,7 @@ pub enum WireOut {
 }
 
 /*
-* ---- Data types used in the messaging layer ----
+* ----  ----
 */
 
 #[derive(Debug, Eq, Hash, PartialEq, Serialize)]
@@ -67,6 +68,10 @@ impl ToOwned for RequestId {
         RequestIdBuf(self.0.to_owned())
     }
 }
+
+/*
+*
+*/
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -92,11 +97,20 @@ impl From<String> for RequestIdBuf {
         RequestIdBuf(s)
     }
 }
+impl From<&str> for RequestIdBuf {
+    fn from(s: &str) -> RequestIdBuf {
+        RequestIdBuf(s.to_owned())
+    }
+}
 impl From<Uuid> for RequestIdBuf {
     fn from(uuid: Uuid) -> RequestIdBuf {
         RequestIdBuf(uuid.to_string())
     }
 }
+
+/*
+*
+*/
 
 #[derive(Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -113,6 +127,10 @@ impl ToOwned for MethodId {
         MethodIdBuf(self.0.to_owned())
     }
 }
+
+/*
+*
+*/
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -138,12 +156,50 @@ impl From<String> for MethodIdBuf {
         MethodIdBuf(s)
     }
 }
+impl From<&str> for MethodIdBuf {
+    fn from(s: &str) -> MethodIdBuf {
+        MethodIdBuf(s.to_owned())
+    }
+}
+
+/*
+*
+*/
+/// Zero-sized type that represents the JSON-RPC version "2.0".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct JsonRpcVer;
+
+impl Serialize for JsonRpcVer {
+    fn serialize<S>(&self, ser: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        ser.serialize_str(JSONRPC_VERSION)
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonRpcVer {
+    fn deserialize<D>(de: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: &str = <&str>::deserialize(de)?;
+        if s == JSONRPC_VERSION {
+            Ok(JsonRpcVer)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "expected {:?}, got {:?}",
+                JSONRPC_VERSION, s
+            )))
+        }
+    }
+}
 
 /*
 *
 */
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArrayParams(Vec<Value>);
 impl Default for ArrayParams {
     fn default() -> Self {
@@ -161,6 +217,11 @@ impl ArrayParams {
     }
 }
 
+/*
+*
+*/
+
+#[derive(Debug, Clone)]
 pub struct ObjectParams(Map<String, Value>);
 impl Default for ObjectParams {
     fn default() -> Self {
@@ -182,7 +243,9 @@ impl ObjectParams {
     }
 }
 
-// ---- Public Data structures used in the messaging layer. ----
+/*
+* ---- Public Data structures used in the messaging layer. ----
+*/
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -250,14 +313,26 @@ impl<T: Serialize> IntoParams for &T {
     }
 }
 
+/*
+* ----  ----
+*/
+
 #[derive(Debug)]
 pub struct RpcResultPayload {
     pub id: RequestIdBuf,
     pub result: JsonSlice,
 }
 
+/*
+* ----  ----
+*/
+
 #[derive(Debug)]
 pub struct SubscriptionPayload(pub Option<JsonSlice>);
+
+/*
+* ----  ----
+*/
 
 pub enum Cmd {
     Call {
@@ -281,6 +356,10 @@ pub enum Cmd {
         method: MethodIdBuf,
     },
 }
+
+/*
+* ----  ----
+*/
 
 #[derive(Debug)]
 pub struct JsonSlice {

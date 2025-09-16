@@ -16,3 +16,9 @@ futures = { version = "0" }
 uuid = { version = "1", features = ["v4"] }
 futures-util = { version = "0" }
 bytes = { version = "1", features = ["serde"] }
+tokio-tungstenite = { version = "0.27.0", features = [
+    "connect",
+    "handshake",
+    "stream",
+    "rustls-tls-native-roots",
+] }

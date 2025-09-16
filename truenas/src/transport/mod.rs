@@ -1,6 +1,7 @@
 use bytes::Bytes;
+use std::error::Error;
+use std::fmt::Debug;
 
-pub mod http;
 pub mod ws;
 
 #[derive(Debug, Clone)]
@@ -18,7 +19,7 @@ pub struct Close {
 }
 
 pub trait TransportSend {
-    type Error: std::fmt::Debug + Send + 'static;
+    type Error: Error + Debug + Send + Sync + 'static;
 
     fn send(&mut self, _event: Event) -> impl Future<Output = Result<(), Self::Error>> + Send + '_ {
         async { Ok(()) }
@@ -26,7 +27,7 @@ pub trait TransportSend {
 }
 
 pub trait TransportRecv {
-    type Error: std::fmt::Debug + Send + 'static;
+    type Error: Error + Debug + Send + Sync + 'static;
 
     fn recv(&mut self) -> impl Future<Output = Result<Option<Event>, Self::Error>> + Send + '_ {
         async { Ok(None) }

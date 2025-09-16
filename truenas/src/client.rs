@@ -1,7 +1,10 @@
 use crate::error::Error;
+use crate::io::{read_task, write_task};
+use crate::state::State;
+use crate::transport::{TransportRecv, TransportSend};
 use crate::types::{
-    Cmd, CmdTx, IntoParams, MethodId, MethodIdBuf, RequestId, RequestIdBuf, Result,
-    RpcResultPayload, SubscriptionRecv,
+    Cmd, CmdTx, IntoParams, MethodIdBuf, RequestId, RequestIdBuf, Result, SubscriptionRecv, WireIn,
+    WireOut,
 };
 use serde::de::DeserializeOwned;
 use std::borrow::Borrow;
@@ -84,6 +87,26 @@ pub struct Client {
 
 // the whole client should use an internal thread and loop model that will use channels.
 impl Client {
+    pub async fn build_from_transport<TS, TR>(ts: TS, tr: TR) -> Result<Self>
+    where
+        TS: TransportSend + Send + Sync + 'static,
+        TR: TransportRecv + Send + Sync + 'static,
+    {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+        let (wirein_tx, wirein_rx) = mpsc::unbounded_channel::<WireIn>();
+        let (wireout_tx, wireout_rx) = mpsc::unbounded_channel::<WireOut>();
+
+        let mut state = State::new(cmd_rx, wireout_tx, wirein_rx);
+        let _state_handle = tokio::spawn(async move {
+            state.task().await.unwrap();
+        });
+
+        let _read_handle = tokio::spawn(read_task(wirein_tx, tr));
+        let _write_handle = tokio::spawn(write_task(wireout_rx, ts));
+
+        Ok(Self { cmd_tx })
+    }
+
     pub async fn call<T, P>(&self, method: MethodIdBuf, params: P) -> Result<Response<T>>
     where
         T: DeserializeOwned,
