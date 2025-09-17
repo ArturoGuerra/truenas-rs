@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use tokio_tungstenite::connect_async;
 use truenas::{
     client::{Client, Response},
-    types::ArrayParams,
+    types::{ArrayParams, ObjectParams},
 };
 
 #[tokio::main]
@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
         .install_default()
         .expect("provider already set elsewhere");
 
-    let url = "wss://10.10.20.20/api/current";
+    let url = std::env::var("TRUENAS_WS")?;
 
     let (ws_stream, _) = connect_async(url).await.expect("failed to connect");
 
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
     println!("Client");
 
     let mut params = ArrayParams::default();
-    params.insert(std::env::var("TRUENAS_API_KEY").unwrap())?;
+    params.insert(std::env::var("TRUENAS_API_KEY")?)?;
 
     println!("Params");
 
@@ -32,6 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
         .call("auth.login_with_api_key".into(), params)
         .await?;
 
+    println!("Result: {:?}", r);
+
+    let mut params = ArrayParams::default();
+    params.insert("pool")?;
+    params.insert("zebraTank")?;
+    let r: Response<serde_json::Value> = client.call("pool.scrub.create".into(), params).await?;
     println!("Result: {:?}", r);
 
     Ok(())

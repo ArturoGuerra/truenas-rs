@@ -2,8 +2,13 @@ use crate::error::Error;
 use crate::transport::{Event, TransportRecv, TransportSend};
 use crate::types::{WireIn, WireInTx, WireOut, WireOutRx};
 use bytes::Bytes;
+use tokio_util::sync::CancellationToken;
 
-pub async fn read_task<T>(wire: WireInTx, mut transport: T) -> Result<(), Error>
+pub async fn read_task<T>(
+    wire: WireInTx,
+    mut transport: T,
+    cancel: CancellationToken,
+) -> Result<(), Error>
 where
     T: TransportRecv + Send,
 {
@@ -25,7 +30,11 @@ where
     Ok(())
 }
 
-pub async fn write_task<T>(mut wire: WireOutRx, mut transport: T) -> Result<(), Error>
+pub async fn write_task<T>(
+    mut wire: WireOutRx,
+    mut transport: T,
+    cancel: CancellationToken,
+) -> Result<(), Error>
 where
     T: TransportSend + Send,
 {

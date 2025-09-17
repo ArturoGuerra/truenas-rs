@@ -1,6 +1,6 @@
 use crate::types::{JsonRpcVer, MethodId, RequestId};
 use serde::{Deserialize, Serialize, de::Error as CustomError};
-use serde_json::{Value, value::RawValue};
+use serde_json::value::RawValue;
 use std::borrow::Cow;
 
 // Spec: https://www.jsonrpc.org/specification
@@ -50,8 +50,6 @@ pub struct RpcError<'a> {
 #[derive(Deserialize, Debug)]
 pub struct Error<'a> {
     pub code: i64,
-    #[expect(dead_code, reason = "Todo")]
-    pub method: Cow<'a, MethodId>,
     #[serde(borrow)]
     pub message: Cow<'a, str>,
     #[serde(borrow)]

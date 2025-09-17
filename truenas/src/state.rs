@@ -5,9 +5,10 @@ use bytes::Bytes;
 use serde_json::value::RawValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::Error;
-use crate::protocol::{self, Response, ResponseAny, RpcResponse};
+use crate::protocol::{self, Response, ResponseAny};
 use crate::types::{
     Cmd, CmdRx, JsonRpcVer, JsonSlice, MethodIdBuf, RequestIdBuf, RpcReply, RpcResultPayload,
     SubscriptionPayload, SubscriptionSender, WireIn, WireInRx, WireOut, WireOutTx,
@@ -169,10 +170,11 @@ impl State {
         }
     }
 
-    pub(crate) async fn task(&mut self) -> Result<(), TaskError> {
+    pub(crate) async fn task(&mut self, cancel: CancellationToken) -> Result<(), TaskError> {
         println!("started state task");
         loop {
             tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
                 // main thread -> worker (here)
                 Some(cmd) = self.cmd_rx.recv() => self.handle_cmd(cmd).await?,
                 // read thread -> worker (here)
