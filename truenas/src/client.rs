@@ -108,13 +108,16 @@ impl Client {
         let (wirein_tx, wirein_rx) = mpsc::unbounded_channel::<WireIn>();
         let (wireout_tx, wireout_rx) = mpsc::unbounded_channel::<WireOut>();
 
+        let state_cancel = cancel.clone();
         let mut state = State::new(cmd_rx, wireout_tx, wirein_rx);
         let _state_handle = tokio::spawn(async move {
-            state.task(cancel.clone()).await.unwrap();
+            state.task(state_cancel).await.unwrap();
         });
 
-        let _read_handle = tokio::spawn(read_task(wirein_tx, tr, cancel.clone()));
-        let _write_handle = tokio::spawn(write_task(wireout_rx, ts, cancel.clone()));
+        let read_cancel = cancel.clone();
+        let _read_handle = tokio::spawn(read_task(wirein_tx, tr, read_cancel));
+        let write_cancel = cancel.clone();
+        let _write_handle = tokio::spawn(write_task(wireout_rx, ts, write_cancel));
 
         Ok(Self {
             inner: Arc::new(InnerClient { cmd_tx, cancel }),

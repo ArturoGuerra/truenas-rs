@@ -12,22 +12,25 @@ pub async fn read_task<T>(
 where
     T: TransportRecv + Send,
 {
-    while let Some(event) = transport.recv().await.map_err(Error::transport_err)? {
-        println!("Got a read event: {:?}", &event);
-        match event {
-            Event::Data(bytes) => wire
-                .send(WireIn::Recv(bytes))
-                .map_err(Error::transport_err)?,
-            Event::Ping(_) => wire.send(WireIn::Ping).map_err(Error::transport_err)?,
-            Event::Pong(_) => wire.send(WireIn::Pong).map_err(Error::transport_err)?,
-            Event::Close(_) => {
-                wire.send(WireIn::Closed).map_err(Error::transport_err)?;
-                break;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            t = transport.recv() => match t.map_err(Error::transport_err)? {
+                Some(event) => match event {
+                    Event::Data(bytes) => wire
+                        .send(WireIn::Recv(bytes))
+                        .map_err(Error::transport_err)?,
+                    Event::Ping(_) => wire.send(WireIn::Ping).map_err(Error::transport_err)?,
+                    Event::Pong(_) => wire.send(WireIn::Pong).map_err(Error::transport_err)?,
+                    Event::Close(_) => {
+                        wire.send(WireIn::Closed).map_err(Error::transport_err)?;
+                        return Ok(());
+                    }
+                },
+                None => { return Ok(()); },
             }
         }
     }
-
-    Ok(())
 }
 
 pub async fn write_task<T>(
