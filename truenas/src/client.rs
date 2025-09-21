@@ -3,13 +3,14 @@ use crate::io::{read_task, write_task};
 use crate::state::State;
 use crate::transport::{TransportRecv, TransportSend};
 use crate::types::{
-    Cmd, CmdTx, IntoParams, MethodIdBuf, RequestId, RequestIdBuf, Result, SubscriptionRecv, WireIn,
-    WireOut,
+    Cmd, CmdRx, CmdTx, IntoParams, MethodIdBuf, RequestId, RequestIdBuf, Result, SubscriptionRecv,
+    WireIn, WireOut,
 };
 use serde::de::DeserializeOwned;
 use std::borrow::Borrow;
-use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -62,7 +63,6 @@ where
 #[derive(Debug)]
 pub struct InnerClient {
     cmd_tx: CmdTx,
-    cancel: CancellationToken,
 }
 
 // TODO: Impl future
@@ -70,7 +70,7 @@ pub struct InnerClient {
 pub struct Subscription<T: DeserializeOwned> {
     _marker: std::marker::PhantomData<T>,
     method: Option<MethodIdBuf>,
-    inner: Arc<InnerClient>,
+    cmd: CmdTx,
     recv: Option<SubscriptionRecv>,
 }
 
@@ -81,8 +81,7 @@ where
     fn drop(&mut self) {
         self.recv.take();
 
-        self.inner
-            .cmd_tx
+        self.cmd
             .send(Cmd::Unsubscribe {
                 method: self.method.take().unwrap(),
             })
@@ -90,9 +89,33 @@ where
     }
 }
 
+// Health of the client
+#[derive(Debug, Clone)]
+pub struct Health {
+    pub attempts: u64,
+    pub reconnects: u64,
+    pub last_error: Option<String>,
+}
+
+// Current state of the client's connection.
+#[derive(Debug, Clone)]
+enum ConnState {
+    Connected,
+    Connecting,
+    Disconnected,
+    ShuttingDown,
+    Failed,
+}
+
 #[derive(Debug, Clone)]
 pub struct Client {
-    inner: Arc<InnerClient>,
+    cmd: CmdTx,
+    cancel: CancellationToken,
+    conn_state: watch::Receiver<ConnState>,
+    health: watch::Receiver<Health>,
+    sup_handle: Arc<Mutex<Option<JoinHandle<Result<()>>>>>,
+    reconnect_backoff: u64,
+    ping_interval: u64,
 }
 
 // the whole client should use an internal thread and loop model that will use channels.
@@ -103,13 +126,54 @@ impl Client {
         TR: TransportRecv + Send + Sync + 'static,
     {
         let cancel = CancellationToken::new();
+        let (conn_state_tx, conn_state_rx) = watch::channel(ConnState::Disconnected);
+        let (health_tx, health_rx) = watch::channel(Health {
+            attempts: 0,
+            reconnects: 0,
+            last_error: None,
+        });
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+
+        let sup_handle = tokio::spawn(Self::supervisor(
+            cmd_rx,
+            conn_state_tx,
+            health_tx,
+            cancel.clone(),
+            ts,
+            tr,
+        ));
+
+        Ok(Self {
+            cmd: cmd_tx,
+            cancel,
+            conn_state: conn_state_rx,
+            health: health_rx,
+            sup_handle: Arc::new(Mutex::new(Some(sup_handle))),
+            reconnect_backoff: 60,
+            ping_interval: 10,
+        })
+    }
+
+    // TODO: Since TR and TS only have one method each then they can be turned into a stream and a
+    // sink.
+    async fn supervisor<TS, TR>(
+        cmd: CmdRx,
+        conn_state: watch::Sender<ConnState>,
+        health: watch::Sender<Health>,
+        cancel: CancellationToken,
+        ts: TS,
+        tr: TR,
+    ) -> Result<()>
+    where
+        TS: TransportSend + Send + Sync + 'static,
+        TR: TransportRecv + Send + Sync + 'static,
+    {
         let (wirein_tx, wirein_rx) = mpsc::unbounded_channel::<WireIn>();
         let (wireout_tx, wireout_rx) = mpsc::unbounded_channel::<WireOut>();
 
         let state_cancel = cancel.clone();
-        let mut state = State::new(cmd_rx, wireout_tx, wirein_rx);
+        let mut state = State::new(cmd, wireout_tx, wirein_rx);
         let _state_handle = tokio::spawn(async move {
             state.task(state_cancel).await.unwrap();
         });
@@ -119,9 +183,7 @@ impl Client {
         let write_cancel = cancel.clone();
         let _write_handle = tokio::spawn(write_task(wireout_rx, ts, write_cancel));
 
-        Ok(Self {
-            inner: Arc::new(InnerClient { cmd_tx, cancel }),
-        })
+        Ok(())
     }
 
     pub async fn call<T, P>(&self, method: MethodIdBuf, params: P) -> Result<Response<T>>
@@ -138,8 +200,7 @@ impl Client {
             reply: tx,
         };
 
-        self.inner
-            .cmd_tx
+        self.cmd
             .send(cmd)
             .map_err(|e| Error::TokioSend(e.to_string()))?;
 
@@ -162,8 +223,7 @@ impl Client {
             params: params.into_params()?,
         };
 
-        self.inner
-            .cmd_tx
+        self.cmd
             .send(cmd)
             .map_err(|e| Error::TokioSend(e.to_string()))
     }
@@ -178,15 +238,14 @@ impl Client {
             ready: tx,
         };
 
-        self.inner
-            .cmd_tx
+        self.cmd
             .send(cmd)
             .map_err(|e| Error::TokioSend(e.to_string()))?;
 
         Ok(Subscription {
             _marker: std::marker::PhantomData,
             method: Some(method),
-            inner: self.inner.clone(),
+            cmd: self.cmd.clone(),
             recv: Some(rx.await.map_err(Error::TokioOneshotRecv)?),
         })
     }

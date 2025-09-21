@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::transport::{Event, TransportRecv, TransportSend};
+use crate::transport::Event;
 use crate::types::{WireIn, WireInTx, WireOut, WireOutRx};
 use bytes::Bytes;
 use tokio_util::sync::CancellationToken;
@@ -14,6 +14,7 @@ where
 {
     loop {
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => return Ok(()),
             t = transport.recv() => match t.map_err(Error::transport_err)? {
                 Some(event) => match event {
@@ -41,30 +42,37 @@ pub async fn write_task<T>(
 where
     T: TransportSend + Send,
 {
-    while let Some(wire) = wire.recv().await {
-        println!("Got a write event: {:?}", &wire);
-        match wire {
-            WireOut::Send(bytes) => transport
-                .send(Event::Data(bytes))
-                .await
-                .map_err(Error::transport_err)?,
-            WireOut::Ping => transport
-                .send(Event::Ping(Bytes::new()))
-                .await
-                .map_err(Error::transport_err)?,
-            WireOut::Pong => transport
-                .send(Event::Pong(Bytes::new()))
-                .await
-                .map_err(Error::transport_err)?,
-            WireOut::Close => {
-                transport
-                    .send(Event::Close(None))
-                    .await
-                    .map_err(Error::transport_err)?;
-                break;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(()),
+            w = wire.recv() => match w {
+                Some(wire) => {
+                    match wire {
+                        WireOut::Send(bytes) => transport
+                            .send(Event::Data(bytes))
+                            .await
+                            .map_err(Error::transport_err)?,
+                        WireOut::Ping => transport
+                            .send(Event::Ping(Bytes::new()))
+                            .await
+                            .map_err(Error::transport_err)?,
+                        WireOut::Pong => transport
+                            .send(Event::Pong(Bytes::new()))
+                            .await
+                            .map_err(Error::transport_err)?,
+                        WireOut::Close => {
+                            transport
+                                .send(Event::Close(None))
+                                .await
+                                .map_err(Error::transport_err)?;
+                            cancel.cancel();
+                            return Ok(())
+                        }
+                    }
+                },
+                None => { return Ok(()); }
             }
         }
     }
-
-    Ok(())
 }

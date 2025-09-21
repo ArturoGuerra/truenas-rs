@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use futures::{Sink, Stream};
 use std::error::Error;
 use std::fmt::Debug;
 
@@ -18,18 +19,24 @@ pub struct Close {
     pub reason: String,
 }
 
-pub trait TransportSend {
-    type Error: Error + Debug + Send + Sync + 'static;
-
-    fn send(&mut self, _event: Event) -> impl Future<Output = Result<(), Self::Error>> + Send + '_ {
-        async { Ok(()) }
-    }
+pub struct Capabilities {
+    pub reconnectable: bool,
+    pub bidirectional: bool,
 }
 
-pub trait TransportRecv {
+pub trait Transport {
     type Error: Error + Debug + Send + Sync + 'static;
+    type TransportStream: Stream<Item = Result<Event, Self::Error>>
+        + Sink<Event, Error = Self::Error>
+        + Send
+        + Sync
+        + 'static;
 
-    fn recv(&mut self) -> impl Future<Output = Result<Option<Event>, Self::Error>> + Send + '_ {
-        async { Ok(None) }
-    }
+    fn capabilities(&self) -> Capabilities;
+    fn connect(
+        &mut self,
+    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + 'static;
+    fn reconnect(
+        &mut self,
+    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + 'static;
 }
