@@ -30,6 +30,7 @@ pub trait Transport {
         + Sink<Event, Error = Self::Error>
         + Send
         + Sync
+        + Unpin
         + 'static;
 
     fn capabilities(&self) -> Capabilities;

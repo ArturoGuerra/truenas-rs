@@ -6,10 +6,7 @@ use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
     WebSocketStream, connect_async,
-    tungstenite::{
-        Error as TungsteniteError, Message,
-        protocol::{CloseFrame, frame::Frame},
-    },
+    tungstenite::{Error as TungsteniteError, Message, protocol::CloseFrame},
 };
 
 #[derive(thiserror::Error, Debug)]

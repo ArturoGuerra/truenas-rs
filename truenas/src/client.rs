@@ -1,11 +1,12 @@
 use crate::error::Error;
 use crate::io::{read_task, write_task};
 use crate::state::State;
-use crate::transport::{TransportRecv, TransportSend};
+use crate::transport::Transport;
 use crate::types::{
     Cmd, CmdRx, CmdTx, IntoParams, MethodIdBuf, RequestId, RequestIdBuf, Result, SubscriptionRecv,
     WireIn, WireOut,
 };
+use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use std::borrow::Borrow;
 use std::sync::{Arc, Mutex};
@@ -120,10 +121,9 @@ pub struct Client {
 
 // the whole client should use an internal thread and loop model that will use channels.
 impl Client {
-    pub async fn build_from_transport<TS, TR>(ts: TS, tr: TR) -> Result<Self>
+    pub async fn build_from_transport<T>(transport: T) -> Result<Self>
     where
-        TS: TransportSend + Send + Sync + 'static,
-        TR: TransportRecv + Send + Sync + 'static,
+        T: Transport + Send + Sync + 'static,
     {
         let cancel = CancellationToken::new();
         let (conn_state_tx, conn_state_rx) = watch::channel(ConnState::Disconnected);
@@ -140,8 +140,7 @@ impl Client {
             conn_state_tx,
             health_tx,
             cancel.clone(),
-            ts,
-            tr,
+            transport,
         ));
 
         Ok(Self {
@@ -157,17 +156,15 @@ impl Client {
 
     // TODO: Since TR and TS only have one method each then they can be turned into a stream and a
     // sink.
-    async fn supervisor<TS, TR>(
+    async fn supervisor<T>(
         cmd: CmdRx,
         conn_state: watch::Sender<ConnState>,
         health: watch::Sender<Health>,
         cancel: CancellationToken,
-        ts: TS,
-        tr: TR,
+        transport: T,
     ) -> Result<()>
     where
-        TS: TransportSend + Send + Sync + 'static,
-        TR: TransportRecv + Send + Sync + 'static,
+        T: Transport + Send + Sync + 'static,
     {
         let (wirein_tx, wirein_rx) = mpsc::unbounded_channel::<WireIn>();
         let (wireout_tx, wireout_rx) = mpsc::unbounded_channel::<WireOut>();
@@ -177,6 +174,10 @@ impl Client {
         let _state_handle = tokio::spawn(async move {
             state.task(state_cancel).await.unwrap();
         });
+
+        let stream = transport.connect().await.map_err(Error::transport_err)?;
+
+        let (sink, stream) = stream.split();
 
         let read_cancel = cancel.clone();
         let _read_handle = tokio::spawn(read_task(wirein_tx, tr, read_cancel));
