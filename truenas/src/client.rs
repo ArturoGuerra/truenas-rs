@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::io::{read_task, write_task};
+use crate::io::{io_task, read_task, write_task};
 use crate::state::State;
 use crate::transport::Transport;
 use crate::types::{
@@ -161,7 +161,7 @@ impl Client {
         conn_state: watch::Sender<ConnState>,
         health: watch::Sender<Health>,
         cancel: CancellationToken,
-        transport: T,
+        mut transport: T,
     ) -> Result<()>
     where
         T: Transport + Send + Sync + 'static,
@@ -177,12 +177,8 @@ impl Client {
 
         let stream = transport.connect().await.map_err(Error::transport_err)?;
 
-        let (sink, stream) = stream.split();
-
-        let read_cancel = cancel.clone();
-        let _read_handle = tokio::spawn(read_task(wirein_tx, tr, read_cancel));
-        let write_cancel = cancel.clone();
-        let _write_handle = tokio::spawn(write_task(wireout_rx, ts, write_cancel));
+        let io_cancel = cancel.clone();
+        let io_handle = io_task(wirein_tx, wireout_rx, stream, cancel);
 
         Ok(())
     }

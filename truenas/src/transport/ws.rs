@@ -1,12 +1,15 @@
 use crate::transport::{Capabilities, Close, Event, Transport};
 use futures::task::{Context, Poll};
-use futures_util::{Sink, Stream, StreamExt};
+use futures_util::{Sink, Stream};
 use std::fmt::Debug;
 use std::pin::Pin;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    WebSocketStream, connect_async,
-    tungstenite::{Error as TungsteniteError, Message, protocol::CloseFrame},
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{
+        Error as TungsteniteError, Message, Utf8Bytes,
+        protocol::{CloseFrame, frame::coding::CloseCode},
+    },
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -15,25 +18,21 @@ pub enum WsError {
     Transport(#[from] TungsteniteError),
 }
 
-pub struct WsClient<S> {
+pub struct WsClient {
     ws_url: String,
-    _marker: std::marker::PhantomData<S>,
 }
 
-pub struct WsConn<S> {
-    inner: WebSocketStream<S>,
+pub struct WsConn {
+    inner: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
 
-impl<S> WsConn<S> {
-    fn new(inner: WebSocketStream<S>) -> Self {
+impl WsConn {
+    fn new(inner: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
         Self { inner }
     }
 }
 
-impl<S> Sink<Event> for WsConn<S>
-where
-    WebSocketStream<S>: Sink<Message, Error = TungsteniteError> + Unpin,
-{
+impl Sink<Event> for WsConn {
     type Error = WsError;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -44,11 +43,11 @@ where
 
     fn start_send(mut self: Pin<&mut Self>, item: Event) -> Result<(), Self::Error> {
         let msg = match item {
-            Event::Data(b) => Message::Binary(b.to_vec()), // one copy (WS needs Vec<u8>)
-            Event::Ping(b) => Message::Ping(b.to_vec()),
-            Event::Pong(b) => Message::Pong(b.to_vec()),
+            Event::Data(b) => Message::Text(unsafe { Utf8Bytes::from_bytes_unchecked(b) }),
+            Event::Ping(b) => Message::Ping(b),
+            Event::Pong(b) => Message::Pong(b),
             Event::Close(cf) => Message::Close(cf.map(|c| CloseFrame {
-                code: i16::from(c.code) as i64,
+                code: CloseCode::from(c.code as u16),
                 reason: c.reason.into(),
             })),
         };
@@ -70,10 +69,7 @@ where
     }
 }
 
-impl<S> Stream for WsConn<S>
-where
-    WebSocketStream<S>: Stream<Item = Result<Message, TungsteniteError>> + Unpin,
-{
+impl Stream for WsConn {
     type Item = Result<Event, WsError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -85,8 +81,8 @@ where
             Poll::Ready(Some(Ok(Message::Frame(_)))) => Poll::Ready(None),
             Poll::Ready(Some(Ok(Message::Close(c)))) => {
                 Poll::Ready(Some(Ok(Event::Close(c.map(|c| Close {
-                    code: i16::from(c.code) as i64,
-                    reason: c.reason.into(),
+                    code: u16::from(c.code) as i64,
+                    reason: c.reason.to_string(),
                 })))))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(WsError::Transport(e)))),
@@ -96,21 +92,15 @@ where
     }
 }
 
-impl<S> WsClient<S> {
+impl WsClient {
     fn new(url: String) -> Self {
-        Self {
-            ws_url: url,
-            _marker: std::marker::PhantomData,
-        }
+        Self { ws_url: url }
     }
 }
 
-impl<S> Transport for WsClient<S>
-where
-    S: AsyncRead + AsyncWrite + Sync + Unpin + Send + 'static,
-{
+impl Transport for WsClient {
     type Error = WsError;
-    type TransportStream = WsConn<S>;
+    type TransportStream = WsConn;
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -121,21 +111,19 @@ where
 
     fn connect(
         &mut self,
-    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + 'static
-    {
+    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + '_ {
         async move {
             let (ws, _) = connect_async(&self.ws_url).await?;
-            WsConn::new(ws)
+            Ok(WsConn::new(ws))
         }
     }
 
     fn reconnect(
         &mut self,
-    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + 'static
-    {
-        async move {
+    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + '_ {
+        async {
             let (ws, _) = connect_async(&self.ws_url).await?;
-            WsConn::new(ws)
+            Ok(WsConn::new(ws))
         }
     }
 }

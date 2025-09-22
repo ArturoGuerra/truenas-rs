@@ -29,15 +29,14 @@ pub trait Transport {
     type TransportStream: Stream<Item = Result<Event, Self::Error>>
         + Sink<Event, Error = Self::Error>
         + Send
-        + Sync
         + Unpin
         + 'static;
 
     fn capabilities(&self) -> Capabilities;
     fn connect(
         &mut self,
-    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + 'static;
+    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + '_;
     fn reconnect(
         &mut self,
-    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + 'static;
+    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + '_;
 }

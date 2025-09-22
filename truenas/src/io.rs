@@ -1,19 +1,22 @@
 use crate::error::Error;
 use crate::transport::Event;
+use crate::transport::Transport;
 use crate::types::{WireIn, WireInTx, WireOut, WireOutRx};
 use bytes::Bytes;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
+use std::error::Error as StdError;
 
-pub async fn io_task<T>(
+pub async fn io_task<T, E>(
     wire_in: WireInTx,
     mut wire_out: WireOutRx,
     stream: T,
     cancel: CancellationToken,
 ) -> Result<(), Error>
 where
-    T: Stream<Item = Result<Event, Error>>
-        + Sink<Event, Error = Error>
+    E: StdError + Send + Sync + 'static, 
+    T: Stream<Item = Result<Event, E>
+        + Sink<Event, Error = E>
         + Send
         + Sync
         + Unpin
