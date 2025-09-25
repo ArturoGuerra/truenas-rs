@@ -35,7 +35,10 @@ impl Error {
     {
         Error::Transport(Box::new(e))
     }
-    pub fn tokiosend_err(e: String) -> Error {
-        Error::TokioSend(e)
+    pub fn tokiosend_err<E>(e: E) -> Error
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        Error::TokioSend(e.to_string())
     }
 }

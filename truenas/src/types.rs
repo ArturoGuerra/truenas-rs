@@ -18,12 +18,12 @@ pub const JSONRPC_VERSION: &str = "2.0";
 // ---- Type aliases ----
 
 pub type Result<T> = std::result::Result<T, Error>;
-pub type CmdTx = mpsc::UnboundedSender<Cmd>;
-pub type CmdRx = mpsc::UnboundedReceiver<Cmd>;
-pub type WireInTx = mpsc::UnboundedSender<WireIn>;
-pub type WireInRx = mpsc::UnboundedReceiver<WireIn>;
-pub type WireOutTx = mpsc::UnboundedSender<WireOut>;
-pub type WireOutRx = mpsc::UnboundedReceiver<WireOut>;
+pub type CmdTx = mpsc::Sender<Cmd>;
+pub type CmdRx = mpsc::Receiver<Cmd>;
+pub type WireInTx = mpsc::Sender<WireIn>;
+pub type WireInRx = mpsc::Receiver<WireIn>;
+pub type WireOutTx = mpsc::Sender<WireOut>;
+pub type WireOutRx = mpsc::Receiver<WireOut>;
 pub type RpcReply = oneshot::Sender<Result<RpcResultPayload>>;
 pub type SubscriptionReady = oneshot::Sender<SubscriptionRecv>;
 pub type SubscriptionSender = broadcast::Sender<SubscriptionPayload>;
@@ -35,18 +35,12 @@ pub type SubscriptionRecv = broadcast::Receiver<SubscriptionPayload>;
 
 #[derive(Debug)]
 pub enum WireIn {
-    Recv(Bytes),
-    Ping,
-    Pong,
-    Closed,
+    Data(Bytes),
 }
 
 #[derive(Debug)]
 pub enum WireOut {
-    Send(Bytes),
-    Ping,
-    Pong,
-    Close,
+    Data(Bytes),
 }
 
 /*

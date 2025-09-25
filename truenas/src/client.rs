@@ -1,19 +1,29 @@
 use crate::error::Error;
-use crate::io::{io_task, read_task, write_task};
-use crate::state::State;
+use crate::io::{IO, io_task};
+use crate::state::{State, StateEvent};
 use crate::transport::Transport;
 use crate::types::{
     Cmd, CmdRx, CmdTx, IntoParams, MethodIdBuf, RequestId, RequestIdBuf, Result, SubscriptionRecv,
-    WireIn, WireOut,
+    SubscriptionSender, WireIn, WireOut,
 };
-use futures::StreamExt;
+use futures::Stream;
 use serde::de::DeserializeOwned;
 use std::borrow::Borrow;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{self, JoinHandle};
+use tokio::time;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const CMD_CHANNEL_CAPACITY: usize = 128;
+const WIRE_OUT_CAPACITY: usize = 256;
+const WIRE_IN_CAPACITY: usize = 256;
+const IO_EVENT_CAPACITY: usize = 8;
+const IO_CTRL_CAPACITY: usize = 4;
+const STATE_EVENT_CAPACITY: usize = 8;
+const STATE_CTRL_CAPACITY: usize = 4;
 
 #[derive(Debug)]
 pub struct Response<T: DeserializeOwned> {
@@ -119,6 +129,11 @@ pub struct Client {
     ping_interval: u64,
 }
 
+#[derive(Debug)]
+enum SupervisorEvent {
+    Shutdown,
+}
+
 // the whole client should use an internal thread and loop model that will use channels.
 impl Client {
     pub async fn build_from_transport<T>(transport: T) -> Result<Self>
@@ -133,7 +148,7 @@ impl Client {
             last_error: None,
         });
 
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(CMD_CHANNEL_CAPACITY);
 
         let sup_handle = tokio::spawn(Self::supervisor(
             cmd_rx,
@@ -154,8 +169,6 @@ impl Client {
         })
     }
 
-    // TODO: Since TR and TS only have one method each then they can be turned into a stream and a
-    // sink.
     async fn supervisor<T>(
         cmd: CmdRx,
         conn_state: watch::Sender<ConnState>,
@@ -164,22 +177,50 @@ impl Client {
         mut transport: T,
     ) -> Result<()>
     where
-        T: Transport + Send + Sync + 'static,
+        T: Transport + Send + 'static,
     {
-        let (wirein_tx, wirein_rx) = mpsc::unbounded_channel::<WireIn>();
-        let (wireout_tx, wireout_rx) = mpsc::unbounded_channel::<WireOut>();
-
-        let state_cancel = cancel.clone();
-        let mut state = State::new(cmd, wireout_tx, wirein_rx);
-        let _state_handle = tokio::spawn(async move {
-            state.task(state_cancel).await.unwrap();
-        });
-
         let stream = transport.connect().await.map_err(Error::transport_err)?;
 
-        let io_cancel = cancel.clone();
-        let io_handle = io_task(wirein_tx, wireout_rx, stream, cancel);
+        let (wirein_tx, wirein_rx) = mpsc::channel(WIRE_IN_CAPACITY);
+        let (wireout_tx, wireout_rx) = mpsc::channel(WIRE_OUT_CAPACITY);
 
+        let (state_ctrl_tx, state_ctrl_rx) = mpsc::channel(STATE_CTRL_CAPACITY);
+        let (state_event_tx, state_event_rx) = mpsc::channel(STATE_EVENT_CAPACITY);
+
+        let mut state = State::new(
+            cmd,
+            wireout_tx,
+            wirein_rx,
+            state_event_tx,
+            state_ctrl_rx,
+            cancel.clone(),
+        );
+
+        let state_handle = tokio::spawn(async move { state.run().await });
+
+        let (io_ctrl_tx, io_ctrl_rx) = mpsc::channel(IO_CTRL_CAPACITY);
+        let (io_event_tx, io_event_rx) = mpsc::channel(IO_EVENT_CAPACITY);
+
+        let mut io = IO::new(
+            wirein_tx,
+            wireout_rx,
+            io_event_tx,
+            io_ctrl_rx,
+            cancel.clone(),
+            stream,
+        );
+
+        let io_handle = tokio::spawn(async move { io.run().await });
+
+        let io_cancel = cancel.clone();
+
+        let mut health_state = Health {
+            attempts: 0,
+            reconnects: 0,
+            last_error: None,
+        };
+
+        //let _ = tokio::join!(io_handle, state_handle);
         Ok(())
     }
 

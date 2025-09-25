@@ -76,8 +76,8 @@ impl Stream for WsConn {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(Message::Binary(b)))) => Poll::Ready(Some(Ok(Event::Data(b)))),
             Poll::Ready(Some(Ok(Message::Text(t)))) => Poll::Ready(Some(Ok(Event::Data(t.into())))),
-            Poll::Ready(Some(Ok(Message::Ping(b)))) => Poll::Ready(Some(Ok(Event::Ping(b.into())))),
-            Poll::Ready(Some(Ok(Message::Pong(b)))) => Poll::Ready(Some(Ok(Event::Ping(b.into())))),
+            Poll::Ready(Some(Ok(Message::Ping(b)))) => Poll::Ready(Some(Ok(Event::Ping(b)))),
+            Poll::Ready(Some(Ok(Message::Pong(b)))) => Poll::Ready(Some(Ok(Event::Ping(b)))),
             Poll::Ready(Some(Ok(Message::Frame(_)))) => Poll::Ready(None),
             Poll::Ready(Some(Ok(Message::Close(c)))) => {
                 Poll::Ready(Some(Ok(Event::Close(c.map(|c| Close {
@@ -109,21 +109,13 @@ impl Transport for WsClient {
         }
     }
 
-    fn connect(
-        &mut self,
-    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + '_ {
-        async move {
-            let (ws, _) = connect_async(&self.ws_url).await?;
-            Ok(WsConn::new(ws))
-        }
+    async fn connect(&mut self) -> Result<Self::TransportStream, Self::Error> {
+        let (ws, _) = connect_async(&self.ws_url).await?;
+        Ok(WsConn::new(ws))
     }
 
-    fn reconnect(
-        &mut self,
-    ) -> impl Future<Output = Result<Self::TransportStream, Self::Error>> + Send + Sync + '_ {
-        async {
-            let (ws, _) = connect_async(&self.ws_url).await?;
-            Ok(WsConn::new(ws))
-        }
+    async fn reconnect(&mut self) -> Result<Self::TransportStream, Self::Error> {
+        let (ws, _) = connect_async(&self.ws_url).await?;
+        Ok(WsConn::new(ws))
     }
 }

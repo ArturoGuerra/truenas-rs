@@ -5,6 +5,7 @@ use bytes::Bytes;
 use serde_json::value::RawValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Error;
@@ -14,20 +15,8 @@ use crate::types::{
     SubscriptionPayload, SubscriptionSender, WireIn, WireInRx, WireOut, WireOutTx,
 };
 
-pub(crate) struct State {
-    pending_calls: HashMap<RequestIdBuf, RpcReply>,
-
-    method_subscriptions: HashMap<MethodIdBuf, SubscriptionSender>,
-
-    cmd_rx: CmdRx,
-
-    to_write_tx: WireOutTx,
-
-    from_read_rx: WireInRx,
-}
-
 #[derive(thiserror::Error, Debug)]
-pub enum TaskError {
+pub enum StateError {
     #[error("channel send error")]
     Send,
     #[error(transparent)]
@@ -36,23 +25,62 @@ pub enum TaskError {
     Serde(#[from] serde_json::Error),
 }
 
-impl State {
-    pub fn new(cmd_rx: CmdRx, to_write_tx: WireOutTx, from_read_rx: WireInRx) -> Self {
+#[derive(Debug)]
+pub enum StateEvent {
+    NormalOperations,
+    Backpreassure,
+}
+
+#[derive(Debug)]
+pub enum StateCtrl {}
+
+type StateCtrlTx = mpsc::Sender<StateCtrl>;
+type StateCtrlRx = mpsc::Receiver<StateCtrl>;
+type StateEventTx = mpsc::Sender<StateEvent>;
+type StateEventRx = mpsc::Receiver<StateEvent>;
+
+pub(crate) struct StateTask {
+    pending_calls: HashMap<RequestIdBuf, RpcReply>,
+    method_subscriptions: HashMap<MethodIdBuf, SubscriptionSender>,
+    cmd_rx: CmdRx,
+    wireout_tx: WireOutTx,
+    wirein_rx: WireInRx,
+    event_tx: StateEventTx,
+    ctrl_rx: StateCtrlRx,
+    cancel: CancellationToken,
+}
+
+impl StateTask {
+    pub fn new(
+        cmd_rx: CmdRx,
+        wireout_tx: WireOutTx,
+        wirein_rx: WireInRx,
+        event_tx: StateEventTx,
+        ctrl_rx: StateCtrlRx,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             pending_calls: HashMap::new(),
             method_subscriptions: HashMap::new(),
             cmd_rx,
-            to_write_tx,
-            from_read_rx,
+            wireout_tx,
+            wirein_rx,
+            event_tx,
+            ctrl_rx,
+            cancel,
         }
     }
 
+    pub(crate) async fn run(&mut self) -> Result<(), StateError> {
+        Ok(())
+    }
+
     #[inline]
-    async fn handle_read(&mut self, bytes: Bytes) -> Result<(), TaskError> {
+    async fn handle_read(&mut self, bytes: Bytes) -> Result<(), StateError> {
         println!("Handling read!");
         println!("Pending calls: {:?}", &self.pending_calls);
 
-        let root = std::str::from_utf8(&bytes).map_err(TaskError::Utf8)?;
+        let root = std::str::from_utf8(&bytes).map_err(StateError::Utf8)?;
         match serde_json::from_slice::<ResponseAny>(&bytes).map(Response::try_from) {
             Ok(Ok(resp)) => match resp {
                 Response::RpcResponse(resp) => match self.pending_calls.remove(resp.id.as_ref()) {
@@ -61,7 +89,7 @@ impl State {
                             id: resp.id.into_owned(),
                             result: JsonSlice::from_raw(bytes.clone(), root, resp.result),
                         }))
-                        .map_err(|_| TaskError::Send),
+                        .map_err(|_| StateError::Send),
                     None => Ok(()),
                 },
                 Response::RpcError(err) => match self.pending_calls.remove(err.id.as_ref()) {
@@ -72,7 +100,7 @@ impl State {
                             message: err.error.message.to_string(),
                             data: err.error.data.map(|v: Cow<'_, RawValue>| v.into_owned()),
                         }))
-                        .map_err(|_| TaskError::Send),
+                        .map_err(|_| StateError::Send),
                     None => Ok(()),
                 },
                 Response::Notification(notification) => match self
@@ -88,7 +116,7 @@ impl State {
                         subscription
                             .send(payload)
                             .map(|_| ())
-                            .map_err(|_| TaskError::Send)
+                            .map_err(|_| StateError::Send)
                     }
                     None => Ok(()),
                 },
@@ -101,7 +129,7 @@ impl State {
     }
 
     #[inline]
-    async fn handle_cmd(&mut self, cmd: Cmd) -> Result<(), TaskError> {
+    async fn handle_cmd(&mut self, cmd: Cmd) -> Result<(), StateError> {
         println!("Handing cmd");
         match cmd {
             Cmd::Call {
@@ -113,7 +141,7 @@ impl State {
                 let params: Option<Box<RawValue>> = params
                     .map(|p| p.into_raw())
                     .transpose()
-                    .map_err(TaskError::Serde)?;
+                    .map_err(StateError::Serde)?;
 
                 let payload = protocol::RpcRequest {
                     jsonrpc: JsonRpcVer,
@@ -124,18 +152,18 @@ impl State {
 
                 let payload = serde_json::to_vec(&payload)
                     .map(Bytes::from)
-                    .map_err(TaskError::Serde)?;
+                    .map_err(StateError::Serde)?;
 
                 self.pending_calls.insert(id, reply);
                 self.to_write_tx
                     .send(WireOut::Send(payload))
-                    .map_err(|_| TaskError::Send)
+                    .map_err(|_| StateError::Send)
             }
             Cmd::Notification { method, params } => {
                 let params = params
                     .map(|p| p.into_raw())
                     .transpose()
-                    .map_err(TaskError::Serde)?;
+                    .map_err(StateError::Serde)?;
                 let payload = protocol::Notification {
                     jsonrpc: JsonRpcVer,
                     method: Cow::Borrowed(method.as_ref()),
@@ -144,17 +172,17 @@ impl State {
 
                 let payload = serde_json::to_vec(&payload)
                     .map(Bytes::from)
-                    .map_err(TaskError::Serde)?;
+                    .map_err(StateError::Serde)?;
 
                 self.to_write_tx
                     .send(WireOut::Send(payload))
-                    .map_err(|_| TaskError::Send)
+                    .map_err(|_| StateError::Send)
             }
             Cmd::Subscribe { method, ready } => {
                 match self.method_subscriptions.get_mut(method.as_ref()) {
                     Some(subscription) => {
                         let subcriber = subscription.subscribe();
-                        ready.send(subcriber).map_err(|_| TaskError::Send)
+                        ready.send(subcriber).map_err(|_| StateError::Send)
                     }
                     None => Ok(()),
                 }
@@ -170,7 +198,7 @@ impl State {
         }
     }
 
-    pub(crate) async fn task(&mut self, cancel: CancellationToken) -> Result<(), TaskError> {
+    pub(crate) async fn task_old(&mut self, cancel: CancellationToken) -> Result<(), StateError> {
         println!("started state task");
         loop {
             tokio::select! {
