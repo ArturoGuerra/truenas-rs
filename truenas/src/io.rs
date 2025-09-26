@@ -98,10 +98,9 @@ where
     data_rx: &'a mut WireOutRx,
     event_tx: &'a mut IoEventTx,
     command_rx: &'a mut IoCommandRx<S, E>,
-    mode: &'a mut IoMode<S, E>,
 }
 
-pub struct IOTask<S, E>
+pub struct IoTask<S, E>
 where
     E: StdError + Send + Sync + 'static,
     S: Stream<Item = Result<Event, E>> + Sink<Event, Error = E> + Send + Unpin + 'static,
@@ -114,7 +113,7 @@ where
     mode: IoMode<S, E>,
 }
 
-impl<S, E> IOTask<S, E>
+impl<S, E> IoTask<S, E>
 where
     E: StdError + Send + Sync + 'static,
     S: Stream<Item = Result<Event, E>> + Sink<Event, Error = E> + Send + Unpin + 'static,
@@ -149,7 +148,10 @@ where
         Ok(())
     }
 
-    async fn process_cmd(&mut self, command: Option<IoCommand<S, E>>) -> Result<(), IoError> {
+    async fn process_cmd(
+        &mut self,
+        command: Option<IoCommand<S, E>>,
+    ) -> Result<Next<S, E>, IoError> {
         match command {
             Some(cmd) => match cmd {
                 IoCommand::SetWriteTimeout(d) => {}
@@ -163,32 +165,64 @@ where
         Ok(())
     }
 
-    async fn disconnected(ctx: IoCtx<'_>) -> Result<(), IoError> {
-        self.event_tx
+    async fn disconnected(ctx: IoCtx<'_, S, E>) -> Result<Next<S, E>, IoError> {
+        ctx.event_tx
             .send(IoEvent::ReconnectRequested)
             .await
             .map_err(IoError::EventSend)?;
-        self.set_mode(IoMode::Connecting);
-        Ok(())
+        Ok(Next::Continue(IoMode::Connecting))
     }
 
-    async fn connecting(&mut self) -> Result<(), IoError> {
-        Ok(())
+    async fn connecting(ctx: IoCtx<'_, S, E>) -> Result<Next<S, E>, IoError> {}
+
+    async fn connected(
+        ctx: IoCtx<'_, S, E>,
+        stream: &mut S,
+        outq: &mut WireOutQueue,
+    ) -> Result<Next<S, E>, IoError> {
+    }
+
+    async fn quiescing(
+        ctx: IoCtx<'_, S, E>,
+        stream: &mut S,
+        outq: &mut WireOutQueue,
+    ) -> Result<Next<S, E>, IoError> {
+    }
+
+    async fn draining(
+        ctx: IoCtx<'_, S, E>,
+        stream: &mut Option<S>,
+        outq: &mut WireOutQueue,
+    ) -> Result<Next<S, E>, IoError> {
     }
 
     pub async fn run(&mut self) -> Result<(), IoError> {
         loop {
-            match &mut self.mode {
+            let ctx = IoCtx {
+                cancel: &self.cancel,
+                data_tx: &mut self.data_tx,
+                data_rx: &mut self.data_rx,
+                event_tx: &mut self.event_tx,
+                command_rx: &mut self.command_rx,
+            };
+            let next = match &mut self.mode {
                 // We have no stream so we must request one.
-                IoMode::Disconnected => self.disconnected().await?,
+                IoMode::Disconnected => IoTask::disconnected(ctx).await?,
                 // We are waiting for the supervisor to send a stream.
-                IoMode::Connecting => {}
+                IoMode::Connecting => IoTask::connecting(ctx).await?,
                 // We are connected have a stream and may be sending/receiving data.
-                IoMode::Connected { .. } => {}
+                IoMode::Connected { stream, outq } => IoTask::connected(ctx, stream, outq).await?,
                 // We are not accepting new data and flushing our buffer.
-                IoMode::Quiescing { .. } => {}
+                IoMode::Quiescing { stream, outq } => IoTask::quiescing(ctx, stream, outq).await?,
                 // We dont have a stream so we cant really flush anything.
-                IoMode::Draining { .. } => {}
+                IoMode::Draining { stream, outq } => IoTask::draining(ctx, stream, outq).await?,
+            };
+
+            match next {
+                Next::Stay => {}
+                Next::Continue(stream) => {}
+                Next::Transition(stream) => {}
+                Next::Exit => {}
             }
         }
 
