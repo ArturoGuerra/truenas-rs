@@ -19,6 +19,9 @@ pub enum IoError {
 
     #[error("event sender: {0}")]
     EventSend(#[from] MpscSendError<IoEvent>),
+
+    #[error("command channel closed")]
+    CommandChannelClosed,
 }
 
 impl IoError {
@@ -118,6 +121,22 @@ where
     E: StdError + Send + Sync + 'static,
     S: Stream<Item = Result<Event, E>> + Sink<Event, Error = E> + Send + Unpin + 'static,
 {
+    fn as_ctx(&mut self) -> IoCtx<'_, S, E> {
+        IoCtx {
+            cancel: &self.cancel,
+            data_tx: &mut self.data_tx,
+            data_rx: &mut self.data_rx,
+            event_tx: &mut self.event_tx,
+            command_rx: &mut self.command_rx,
+        }
+    }
+}
+
+impl<S, E> IoTask<S, E>
+where
+    E: StdError + Send + Sync + 'static,
+    S: Stream<Item = Result<Event, E>> + Sink<Event, Error = E> + Send + Unpin + 'static,
+{
     pub fn new(
         cancel: CancellationToken,
         data_tx: WireInTx,
@@ -143,28 +162,6 @@ where
         }
     }
 
-    async fn set_mode(&mut self, mode: IoMode<S, E>) -> Result<(), IoError> {
-        self.mode = mode;
-        Ok(())
-    }
-
-    async fn process_cmd(
-        &mut self,
-        command: Option<IoCommand<S, E>>,
-    ) -> Result<Next<S, E>, IoError> {
-        match command {
-            Some(cmd) => match cmd {
-                IoCommand::SetWriteTimeout(d) => {}
-                IoCommand::SwapStream(new_stream) => {}
-                IoCommand::PingNow => {}
-                IoCommand::Quiesce => {}
-                IoCommand::Resume => {}
-            },
-            None => {}
-        }
-        Ok(())
-    }
-
     async fn disconnected(ctx: IoCtx<'_, S, E>) -> Result<Next<S, E>, IoError> {
         ctx.event_tx
             .send(IoEvent::ReconnectRequested)
@@ -173,13 +170,56 @@ where
         Ok(Next::Continue(IoMode::Connecting))
     }
 
-    async fn connecting(ctx: IoCtx<'_, S, E>) -> Result<Next<S, E>, IoError> {}
+    async fn connecting(ctx: IoCtx<'_, S, E>) -> Result<Next<S, E>, IoError> {
+        select! {
+            _ = ctx.cancel.cancelled() => {
+                Ok(Next::Exit)
+            },
+            cmd = ctx.command_rx.recv() => match cmd {
+                Some(cmd) => match cmd {
+                    IoCommand::SwapStream(s) =>
+                        Ok(Next::Continue(IoMode::Connected { stream: s, outq: WireOutQueue::new() }))
+                    ,
+                    _ => {
+                        ctx.event_tx.send(IoEvent::ReconnectRequested).await.map_err(IoError::transport_err)?;
+                        Ok(Next::Stay)
+                    },
+                },
+                None => Err(IoError::CommandChannelClosed),
+
+            }
+        }
+    }
 
     async fn connected(
         ctx: IoCtx<'_, S, E>,
         stream: &mut S,
         outq: &mut WireOutQueue,
     ) -> Result<Next<S, E>, IoError> {
+        let (mut sink, mut stream) = stream.split();
+
+        select! {
+            _ = ctx.cancel.cancelled() => { Ok(Next::Exit) },
+            cmd = ctx.command_rx.recv() => match cmd {
+                Some(cmd) => match cmd {
+                    IoCommand::SetWriteTimeout(_) => Ok(Next::Stay),
+                    IoCommand::SwapStream(s) => {
+                        Ok(Next::Continue(IoMode::Connected { stream: s, outq: WireOutQueue::new() }))
+                    },
+                    IoCommand::PingNow => {
+                        Ok(Next::Stay)
+                    },
+                    IoCommand::Quiesce => {
+                        Ok(Next::Stay)
+                    },
+                    IoCommand::Resume => {
+                        Ok(Next::Stay)
+                    },
+
+                },
+                None => Err(IoError::CommandChannelClosed),
+            }
+        }
     }
 
     async fn quiescing(
@@ -205,6 +245,7 @@ where
                 event_tx: &mut self.event_tx,
                 command_rx: &mut self.command_rx,
             };
+
             let next = match &mut self.mode {
                 // We have no stream so we must request one.
                 IoMode::Disconnected => IoTask::disconnected(ctx).await?,
@@ -220,9 +261,16 @@ where
 
             match next {
                 Next::Stay => {}
-                Next::Continue(stream) => {}
-                Next::Transition(stream) => {}
-                Next::Exit => {}
+                Next::Continue(mode) => {
+                    self.mode = mode;
+                    continue;
+                }
+                Next::Transition(mode) => {
+                    self.mode = mode;
+                }
+                Next::Exit => {
+                    break;
+                }
             }
         }
 
