@@ -1,6 +1,6 @@
 use crate::transport::{Capabilities, Close, Event, Transport};
 use futures::task::{Context, Poll};
-use futures_util::{Sink, Stream};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use std::fmt::Debug;
 use std::pin::Pin;
 use tokio::net::TcpStream;

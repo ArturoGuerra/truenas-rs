@@ -24,6 +24,8 @@ const IO_EVENT_CAPACITY: usize = 8;
 const IO_CTRL_CAPACITY: usize = 4;
 const STATE_EVENT_CAPACITY: usize = 8;
 const STATE_CTRL_CAPACITY: usize = 4;
+const OUTQ_BACKPREASSURE_THRESHOLD: usize = 192;
+const OUTQ_CAPACITY: usize = 256;
 
 #[derive(Debug)]
 pub struct Response<T: DeserializeOwned> {
