@@ -8,7 +8,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
 };
 use futures_util::future::{AbortHandle, Abortable};
-use std::{collections::VecDeque, error::Error as StdError, mem};
+use std::{error::Error as StdError, mem};
 use tokio::{
     select,
     sync::mpsc::{self, error::SendError as MpscSendError},
@@ -17,12 +17,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const IO_INTERNAL_EVENT_CAPACITY: usize = 64;
-
-#[derive(Debug)]
-enum IoInternalEvent {
-    Ping(Bytes),
-    Pong(Bytes),
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum IoError {
@@ -51,6 +45,13 @@ impl IoError {
     }
 }
 
+#[derive(Debug)]
+enum IoInternalEvent {
+    Ping(Bytes),
+    Pong(Bytes),
+}
+
+#[derive(Debug)]
 enum Next<S, E>
 where
     E: StdError + Send + Sync + 'static,
@@ -66,7 +67,7 @@ where
 }
 
 #[derive(Debug)]
-pub enum IoMode<S, E>
+enum IoMode<S, E>
 where
     E: StdError + Send + Sync + 'static,
     S: Stream<Item = Result<Event, E>> + Sink<Event, Error = E> + Send + Unpin + 'static,
@@ -94,6 +95,7 @@ pub enum IoEvent {
     ReconnectRequested,
 }
 
+#[derive(Debug)]
 pub enum IoCommand<S, E>
 where
     E: StdError + Send + Sync + 'static,
@@ -328,7 +330,7 @@ where
                         Err(_) => return Ok(Next::Draining),
                     }
 
-                };:
+                }
             }
         }
     }
