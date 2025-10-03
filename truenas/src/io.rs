@@ -2,17 +2,27 @@ use crate::{
     transport::Event,
     types::{WireIn, WireInTx, WireOut, WireOutRx},
 };
+use bytes::Bytes;
 use futures::{
     Sink, SinkExt, Stream, StreamExt,
     stream::{SplitSink, SplitStream},
 };
 use futures_util::future::{AbortHandle, Abortable};
-use std::{collections::VecDeque, error::Error as StdError, mem, time::Duration};
+use std::{collections::VecDeque, error::Error as StdError, mem};
 use tokio::{
     select,
     sync::mpsc::{self, error::SendError as MpscSendError},
+    time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
+
+const IO_INTERNAL_EVENT_CAPACITY: usize = 64;
+
+#[derive(Debug)]
+enum IoInternalEvent {
+    Ping(Bytes),
+    Pong(Bytes),
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum IoError {
@@ -27,6 +37,9 @@ pub enum IoError {
 
     #[error("wire in sender: {0}")]
     WireInSend(#[from] MpscSendError<WireIn>),
+
+    #[error("internal sender: {0}")]
+    InternalSend(#[from] MpscSendError<IoInternalEvent>),
 }
 
 impl IoError {
@@ -107,6 +120,7 @@ where
     event_tx: &'a mut IoEventTx,
     command_rx: &'a mut IoCommandRx<S, E>,
     timeout: &'a Duration,
+    ping_interval: &'a Duration,
 }
 
 pub struct IoTask<S, E>
@@ -120,6 +134,7 @@ where
     event_tx: IoEventTx,
     command_rx: IoCommandRx<S, E>,
     timeout: Duration,
+    ping_interval: Duration,
     mode: IoMode<S, E>,
 }
 
@@ -136,6 +151,7 @@ where
             event_tx: &mut self.event_tx,
             command_rx: &mut self.command_rx,
             timeout: &self.timeout,
+            ping_interval: &self.ping_interval,
         }
     }
 }
@@ -152,6 +168,7 @@ where
         event_tx: IoEventTx,
         command_rx: IoCommandRx<S, E>,
         timeout: Duration,
+        ping_interval: Duration,
         stream: Option<S>,
     ) -> Self {
         let mode = match stream {
@@ -165,6 +182,7 @@ where
             event_tx,
             command_rx,
             timeout,
+            ping_interval,
             mode,
         }
     }
@@ -178,6 +196,7 @@ where
                 event_tx: &mut self.event_tx,
                 command_rx: &mut self.command_rx,
                 timeout: &self.timeout,
+                ping_interval: &self.ping_interval,
             };
 
             let next = match &mut self.mode {
@@ -199,7 +218,13 @@ where
                     break;
                 }
                 Next::Connecting => self.mode = IoMode::Connecting,
-                Next::Disconnected => self.mode = IoMode::Disconnected,
+                Next::Disconnected => {
+                    self.event_tx
+                        .send(IoEvent::Disconnected)
+                        .await
+                        .map_err(IoError::EventSend)?;
+                    self.mode = IoMode::Disconnected
+                }
                 Next::Connected(stream) => self.mode = IoMode::Connected(stream),
                 Next::Draining => {
                     if matches!(self.mode, IoMode::Connected { .. }) {
@@ -218,10 +243,7 @@ where
         Ok(())
     }
 
-    async fn command(
-        ctx: &IoCtx<'_, S, E>,
-        command: Option<IoCommand<S, E>>,
-    ) -> Result<Next<S, E>, IoError> {
+    async fn command(command: Option<IoCommand<S, E>>) -> Result<Next<S, E>, IoError> {
         match command {
             Some(command) => match command {
                 IoCommand::PingNow => Ok(Next::Stay),
@@ -245,7 +267,7 @@ where
             _ = ctx.cancel.cancelled() => {
                 Ok(Next::Exit)
             },
-            cmd = ctx.command_rx.recv() => Self::command(&ctx, cmd).await,
+            cmd = ctx.command_rx.recv() => Self::command(cmd).await,
 
         }
     }
@@ -253,70 +275,114 @@ where
     async fn draining(ctx: IoCtx<'_, S, E>, stream: &mut S) -> Result<Next<S, E>, IoError> {
         select! {
             _ = ctx.cancel.cancelled() => Ok(Next::Exit),
-            cmd = ctx.command_rx.recv() => Self::command(&ctx, cmd).await,
+            cmd = ctx.command_rx.recv() => Self::command(cmd).await,
         }
     }
 
     async fn connected(ctx: IoCtx<'_, S, E>, stream: &mut S) -> Result<Next<S, E>, IoError> {
-        let (mut sink, mut stream) = stream.split();
+        let (sink, stream) = stream.split();
+
+        let (io_tx, io_rx) = mpsc::channel::<IoInternalEvent>(64);
 
         let (r_abort, r_reg) = AbortHandle::new_pair();
-        let r_task = Abortable::new(Self::reader(ctx.data_tx, stream), r_reg);
+        let r_task = Abortable::new(Self::reader(ctx.data_tx, io_tx.clone(), stream), r_reg);
         let mut r_done = Box::pin(r_task);
 
         let (w_abort, w_reg) = AbortHandle::new_pair();
-        let w_task = Abortable::new(Self::writer(ctx.data_rx, sink), w_reg);
+        let w_task = Abortable::new(Self::writer(ctx.data_rx, io_rx, sink), w_reg);
         let mut w_done = Box::pin(w_task);
+
+        let mut ping_interval = time::interval(ctx.ping_interval.clone());
+        ping_interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
         loop {
             select! {
-                _ = ctx.cancel.cancelled() => { return Ok(Next::Draining) },
-                command = ctx.command_rx.recv() => return match command {
-                    Some(command) => match command {
-                        IoCommand::PingNow => Ok(Next::Stay),
-                        IoCommand::SwapStream(stream) => Ok(Next::Connected(stream)),
-                        IoCommand::SetWriteTimeout(duration) => Ok(Next::SetTimeout(duration)),
-                    },
-                    None => Ok(Next::Exit),
+                _ = ctx.cancel.cancelled() => {
+                    r_abort.abort();
+                    w_abort.abort();
+                    return Ok(Next::Draining)
                 },
+                command = ctx.command_rx.recv() => {
+                    r_abort.abort();
+                    w_abort.abort();
+                    return Self::command(command).await
+                },
+                _ = ping_interval.tick() => {
+                    // TODO: Figure out if an empty bytes buffer is the correct data.
+                    io_tx.send(IoInternalEvent::Ping(Bytes::new())).await.map_err(IoError::InternalSend)?;
+                }
                 res = &mut r_done => {
+                    w_abort.abort();
+                    match res {
+                        Ok(Ok(next)) => return Ok(next),
+                        Ok(Err(err)) => return Err(err),
+                        Err(_) => return Ok(Next::Draining),
+                    }
                 },
                 res = &mut w_done => {
-                }
+                    r_abort.abort();
+                    match res {
+                        // TODO: Figure out if exist is the correct state.
+                        Ok(Ok(())) => return Ok(Next::Exit),
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => return Ok(Next::Draining),
+                    }
+
+                };:
             }
         }
     }
 
     async fn writer(
         data_rx: &mut WireOutRx,
+        mut io_rx: mpsc::Receiver<IoInternalEvent>,
         mut sink: SplitSink<&mut S, Event>,
     ) -> Result<(), IoError> {
         loop {
-            match data_rx.recv().await {
-                Some(WireOut::Data(bytes)) => sink
-                    .send(Event::Data(bytes))
-                    .await
-                    .map_err(IoError::transport_err)?,
-                None => return Ok(()),
+            select! {
+                data = data_rx.recv() => match data {
+                    Some(WireOut::Data(b)) => sink
+                        .send(Event::Data(b))
+                        .await
+                        .map_err(IoError::transport_err)?,
+                    None => return Ok(()),
+                },
+                data = io_rx.recv() => match data {
+                    Some(IoInternalEvent::Ping(bytes)) => sink.send(Event::Ping(bytes)).await.map_err(IoError::transport_err)?,
+                    Some(IoInternalEvent::Pong(bytes)) => sink.send(Event::Pong(bytes)).await.map_err(IoError::transport_err)?,
+                    None => return Ok(()),
+
+                }
+
             }
         }
     }
 
     async fn reader(
-        event_tx: &mut IoEventTx,
         data_tx: &mut WireInTx,
+        io_tx: mpsc::Sender<IoInternalEvent>,
         mut stream: SplitStream<&mut S>,
     ) -> Result<Next<S, E>, IoError> {
         loop {
             match stream.next().await {
-                Some(Ok(Event::Data(bytes))) => {
+                Some(Ok(Event::Data(b))) => {
                     data_tx
-                        .send(WireIn::Data(bytes))
+                        .send(WireIn::Data(b))
                         .await
                         .map_err(IoError::WireInSend)?;
                 }
-                Some(Ok(Event::Ping(_))) | Some(Ok(Event::Pong(_))) => {
-                    unreachable!()
+                Some(Ok(Event::Ping(b))) => {
+                    io_tx
+                        .send(IoInternalEvent::Ping(b))
+                        .await
+                        .map_err(IoError::InternalSend)?;
+                }
+
+                Some(Ok(Event::Pong(b))) => {
+                    io_tx
+                        .send(IoInternalEvent::Pong(b))
+                        .await
+                        .map_err(IoError::InternalSend)?;
                 }
 
                 Some(Ok(Event::Close(close))) => {
@@ -324,20 +390,12 @@ where
                     if let Some(close) = close {
                         println!("stream closed: {:?}", close);
                     }
-                    event_tx
-                        .send(IoEvent::Disconnected)
-                        .await
-                        .map_err(IoError::EventSend)?;
                     return Ok(Next::Disconnected);
                 }
 
                 Some(Err(err)) => return Err(IoError::transport_err(err)),
 
                 None => {
-                    event_tx
-                        .send(IoEvent::Disconnected)
-                        .await
-                        .map_err(IoError::EventSend)?;
                     return Ok(Next::Disconnected);
                 }
             }
