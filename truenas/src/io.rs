@@ -1,22 +1,20 @@
 use crate::{
     transport::Event,
-    types::{WireIn, WireInTx, WireOut, WireOutRx},
+    types::{IO_WRITE_BUDGET, WIRE_OUT_CAP, WireIn, WireInTx, WireOut, WireOutRx},
 };
 use bytes::Bytes;
 use futures::{
     Sink, SinkExt, Stream, StreamExt,
     stream::{SplitSink, SplitStream},
 };
-use futures_util::future::{AbortHandle, Abortable};
-use std::{error::Error as StdError, mem};
+use futures_util::future::{AbortHandle, Abortable, poll_fn};
+use std::{error::Error as StdError, mem, pin::Pin};
 use tokio::{
     select,
     sync::mpsc::{self, error::SendError as MpscSendError},
     time::{self, Duration},
 };
 use tokio_util::sync::CancellationToken;
-
-const IO_INTERNAL_EVENT_CAPACITY: usize = 64;
 
 #[derive(thiserror::Error, Debug)]
 pub enum IoError {
@@ -275,10 +273,27 @@ where
     }
 
     async fn draining(ctx: IoCtx<'_, S, E>, stream: &mut S) -> Result<Next<S, E>, IoError> {
-        select! {
-            _ = ctx.cancel.cancelled() => Ok(Next::Exit),
-            cmd = ctx.command_rx.recv() => Self::command(cmd).await,
+        let mut buf = Vec::with_capacity(IO_WRITE_BUDGET);
+        let target = WIRE_OUT_CAP.min(IO_WRITE_BUDGET);
+
+        loop {
+            buf.clear();
+            if ctx.data_rx.recv_many(&mut buf, target).await == 0 {
+                break;
+            }
+
+            for event in buf.drain(..) {
+                let WireOut::Data(b) = event;
+                stream
+                    .feed(Event::Data(b))
+                    .await
+                    .map_err(IoError::transport_err)?;
+            }
+
+            stream.flush().await.map_err(IoError::transport_err)?;
         }
+
+        Ok(Next::Exit)
     }
 
     async fn connected(ctx: IoCtx<'_, S, E>, stream: &mut S) -> Result<Next<S, E>, IoError> {
@@ -304,17 +319,16 @@ where
                     w_abort.abort();
                     return Ok(Next::Draining)
                 },
-                command = ctx.command_rx.recv() => {
+                cmd = ctx.command_rx.recv() => {
                     r_abort.abort();
                     w_abort.abort();
-                    return Self::command(command).await
+                    return Self::command(cmd).await
                 },
                 _ = ping_interval.tick() => {
                     // TODO: Figure out if an empty bytes buffer is the correct data.
                     io_tx.send(IoInternalEvent::Ping(Bytes::new())).await.map_err(IoError::InternalSend)?;
                 }
                 res = &mut r_done => {
-                    w_abort.abort();
                     match res {
                         Ok(Ok(next)) => return Ok(next),
                         Ok(Err(err)) => return Err(err),
@@ -322,10 +336,9 @@ where
                     }
                 },
                 res = &mut w_done => {
-                    r_abort.abort();
                     match res {
                         // TODO: Figure out if exist is the correct state.
-                        Ok(Ok(())) => return Ok(Next::Exit),
+                        Ok(Ok(())) => return Ok(Next::Disconnected),
                         Ok(Err(e)) => return Err(e),
                         Err(_) => return Ok(Next::Draining),
                     }

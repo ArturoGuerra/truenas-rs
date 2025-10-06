@@ -1,10 +1,12 @@
 use crate::error::Error;
-use crate::io::{IO, io_task};
-use crate::state::{State, StateEvent};
+use crate::io::IoTask;
+use crate::state::StateTask;
 use crate::transport::Transport;
 use crate::types::{
-    Cmd, CmdRx, CmdTx, IntoParams, MethodIdBuf, RequestId, RequestIdBuf, Result, SubscriptionRecv,
-    SubscriptionSender, WireIn, WireOut,
+    CMD_CHANNEL_CAP, Cmd, CmdRx, CmdTx, IO_CTRL_CAP, IO_EVENT_CAP, IntoParams, MethodIdBuf,
+    OUTQ_BACKPREASSURE_THRESHOLD, OUTQ_CAP, RequestId, RequestIdBuf, Result, STATE_CTRL_CAP,
+    STATE_EVENT_CAP, SubscriptionRecv, SubscriptionSender, WIRE_IN_CAP, WIRE_OUT_CAP, WireIn,
+    WireOut,
 };
 use futures::Stream;
 use serde::de::DeserializeOwned;
@@ -16,16 +18,6 @@ use tokio::task::{self, JoinHandle};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
-const CMD_CHANNEL_CAPACITY: usize = 128;
-const WIRE_OUT_CAPACITY: usize = 256;
-const WIRE_IN_CAPACITY: usize = 256;
-const IO_EVENT_CAPACITY: usize = 8;
-const IO_CTRL_CAPACITY: usize = 4;
-const STATE_EVENT_CAPACITY: usize = 8;
-const STATE_CTRL_CAPACITY: usize = 4;
-const OUTQ_BACKPREASSURE_THRESHOLD: usize = 192;
-const OUTQ_CAPACITY: usize = 256;
 
 #[derive(Debug)]
 pub struct Response<T: DeserializeOwned> {
@@ -150,7 +142,7 @@ impl Client {
             last_error: None,
         });
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(CMD_CHANNEL_CAPACITY);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(CMD_CHANNEL_CAP);
 
         let sup_handle = tokio::spawn(Self::supervisor(
             cmd_rx,
@@ -183,38 +175,38 @@ impl Client {
     {
         let stream = transport.connect().await.map_err(Error::transport_err)?;
 
-        let (wirein_tx, wirein_rx) = mpsc::channel(WIRE_IN_CAPACITY);
-        let (wireout_tx, wireout_rx) = mpsc::channel(WIRE_OUT_CAPACITY);
+        let (wirein_tx, wirein_rx) = mpsc::channel(WIRE_IN_CAP);
+        let (wireout_tx, wireout_rx) = mpsc::channel(WIRE_OUT_CAP);
 
-        let (state_ctrl_tx, state_ctrl_rx) = mpsc::channel(STATE_CTRL_CAPACITY);
-        let (state_event_tx, state_event_rx) = mpsc::channel(STATE_EVENT_CAPACITY);
+        let (state_ctrl_tx, state_ctrl_rx) = mpsc::channel(STATE_CTRL_CAP);
+        let (state_event_tx, state_event_rx) = mpsc::channel(STATE_EVENT_CAP);
 
-        let mut state = State::new(
+        let mut state = StateTask::new(
+            cancel.clone(),
             cmd,
             wireout_tx,
             wirein_rx,
             state_event_tx,
             state_ctrl_rx,
-            cancel.clone(),
         );
 
         let state_handle = tokio::spawn(async move { state.run().await });
 
-        let (io_ctrl_tx, io_ctrl_rx) = mpsc::channel(IO_CTRL_CAPACITY);
-        let (io_event_tx, io_event_rx) = mpsc::channel(IO_EVENT_CAPACITY);
+        let (io_ctrl_tx, io_ctrl_rx) = mpsc::channel(IO_CTRL_CAP);
+        let (io_event_tx, io_event_rx) = mpsc::channel(IO_EVENT_CAP);
 
-        let mut io = IO::new(
+        let mut io_task = IoTask::new(
+            cancel.clone(),
             wirein_tx,
             wireout_rx,
             io_event_tx,
             io_ctrl_rx,
-            cancel.clone(),
-            stream,
+            Duration::new(60, 0),
+            Duration::new(1, 0),
+            Some(stream),
         );
 
-        let io_handle = tokio::spawn(async move { io.run().await });
-
-        let io_cancel = cancel.clone();
+        let io_handle = tokio::spawn(async move { io_task.run().await });
 
         let mut health_state = Health {
             attempts: 0,

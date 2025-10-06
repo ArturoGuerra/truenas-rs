@@ -12,6 +12,18 @@ use std::ops::Range;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
+pub const IO_INTERNAL_EVENT_CAP: usize = 64;
+pub const IO_WRITE_BUDGET: usize = 32; // Latency vs throughput
+pub const CMD_CHANNEL_CAP: usize = 128;
+pub const WIRE_OUT_CAP: usize = 256;
+pub const WIRE_IN_CAP: usize = 256;
+pub const IO_EVENT_CAP: usize = 8;
+pub const IO_CTRL_CAP: usize = 4;
+pub const STATE_EVENT_CAP: usize = 8;
+pub const STATE_CTRL_CAP: usize = 4;
+pub const OUTQ_BACKPREASSURE_THRESHOLD: usize = 192;
+pub const OUTQ_CAP: usize = 256;
+
 /// String constant for the JSON-RPC version.
 pub const JSONRPC_VERSION: &str = "2.0";
 

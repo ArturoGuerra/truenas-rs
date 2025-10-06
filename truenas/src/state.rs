@@ -1,22 +1,21 @@
 /* Handles the state of the socket, http connections etc, keeping track of requests and responses
 * allowing for a seamless calling convention for methods */
 
+use crate::{
+    protocol::{self, Response, ResponseAny},
+    types::{
+        Cmd, CmdRx, JsonRpcVer, JsonSlice, MethodIdBuf, RequestIdBuf, RpcReply, RpcResultPayload,
+        SubscriptionPayload, SubscriptionSender, WireIn, WireInRx, WireOut, WireOutTx,
+    },
+};
 use bytes::Bytes;
 use serde_json::value::RawValue;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::{borrow::Cow, collections::HashMap};
+use tokio::{select, sync::mpsc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-use crate::error::Error;
-use crate::protocol::{self, Response, ResponseAny};
-use crate::types::{
-    Cmd, CmdRx, JsonRpcVer, JsonSlice, MethodIdBuf, RequestIdBuf, RpcReply, RpcResultPayload,
-    SubscriptionPayload, SubscriptionSender, WireIn, WireInRx, WireOut, WireOutTx,
-};
-
 #[derive(thiserror::Error, Debug)]
-pub enum StateError {
+pub enum Error {
     #[error("channel send error")]
     Send,
     #[error(transparent)]
@@ -26,52 +25,72 @@ pub enum StateError {
 }
 
 #[derive(Debug)]
-pub enum StateEvent {
+pub enum Event {
     NormalOperations,
     Backpreassure,
 }
 
 #[derive(Debug)]
-pub enum StateCtrl {}
+pub enum Ctrl {}
 
-type StateCtrlTx = mpsc::Sender<StateCtrl>;
-type StateCtrlRx = mpsc::Receiver<StateCtrl>;
-type StateEventTx = mpsc::Sender<StateEvent>;
-type StateEventRx = mpsc::Receiver<StateEvent>;
+type StateCtrlTx = mpsc::Sender<Ctrl>;
+type StateCtrlRx = mpsc::Receiver<Ctrl>;
+type StateEventTx = mpsc::Sender<Event>;
+type StateEventRx = mpsc::Receiver<Event>;
 
 pub(crate) struct StateTask {
     pending_calls: HashMap<RequestIdBuf, RpcReply>,
     method_subscriptions: HashMap<MethodIdBuf, SubscriptionSender>,
+
+    cancel: CancellationToken,
     cmd_rx: CmdRx,
-    wireout_tx: WireOutTx,
-    wirein_rx: WireInRx,
+    data_tx: WireOutTx,
+    data_rx: WireInRx,
     event_tx: StateEventTx,
     ctrl_rx: StateCtrlRx,
-    cancel: CancellationToken,
+
+    req_timeout: Duration,
 }
 
 impl StateTask {
     pub fn new(
+        cancel: CancellationToken,
         cmd_rx: CmdRx,
-        wireout_tx: WireOutTx,
-        wirein_rx: WireInRx,
+        data_tx: WireOutTx,
+        data_rx: WireInRx,
         event_tx: StateEventTx,
         ctrl_rx: StateCtrlRx,
-        cancel: CancellationToken,
+        req_timeout: Duration,
     ) -> Self {
         Self {
             pending_calls: HashMap::new(),
             method_subscriptions: HashMap::new(),
+            cancel,
             cmd_rx,
-            wireout_tx,
-            wirein_rx,
+            data_tx,
+            data_rx,
             event_tx,
             ctrl_rx,
-            cancel,
+            req_timeout,
         }
     }
 
-    pub(crate) async fn run(&mut self) -> Result<(), StateError> {
+    pub(crate) async fn run(&mut self) -> Result<(), Error> {
+        println!("started state task");
+
+        loop {
+            select! {
+                _ = self.cancel.cancelled() => break,
+                Some(write) = self.cmd_rx.recv() => self.writer(write).await?,
+                Some(read) = self.data_rx.recv() => self.reader(read).await?,
+
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn reader(&mut self, data: WireIn) -> Result<(), Error> {
         Ok(())
     }
 
