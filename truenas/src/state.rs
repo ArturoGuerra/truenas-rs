@@ -91,6 +91,29 @@ impl StateTask {
     }
 
     async fn reader(&mut self, data: WireIn) -> Result<(), Error> {
+        println!("Handling read!");
+
+        match data {
+            WireIn::Data(bytes) => {
+                let root = std::str::from_utf8(&bytes).map_err(Error::Utf8)?;
+                match serde_json::from_slice::<ResponseAny>(&bytes)
+                    .map(Response::try_from)
+                    .flatten()
+                {
+                    Ok(resp) => match resp {
+                        Response::RpcResponse(resp) => {}
+                        Response::Notification(notification) => {}
+                        Response::RpcError(err) => {}
+                    },
+                    Err(err) => {
+                        //TODO: This is a serde error so it should be logged but it shouldnt cause any
+                        // other side effects.
+                        println!("error parsing data: {:?}", err);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -100,8 +123,11 @@ impl StateTask {
         println!("Pending calls: {:?}", &self.pending_calls);
 
         let root = std::str::from_utf8(&bytes).map_err(StateError::Utf8)?;
-        match serde_json::from_slice::<ResponseAny>(&bytes).map(Response::try_from) {
-            Ok(Ok(resp)) => match resp {
+        match serde_json::from_slice::<ResponseAny>(&bytes)
+            .map(Response::try_from)
+            .flatten()
+        {
+            Ok(resp) => match resp {
                 Response::RpcResponse(resp) => match self.pending_calls.remove(resp.id.as_ref()) {
                     Some(sender) => sender
                         .send(Ok(RpcResultPayload {

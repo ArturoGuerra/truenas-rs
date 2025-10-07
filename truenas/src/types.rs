@@ -7,8 +7,7 @@ use crate::error::Error;
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::value::{Map, RawValue, Value};
-use std::borrow::Borrow;
-use std::ops::Range;
+use std::{borrow::Borrow, ops::Range, result::Result as StdResult};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
@@ -23,20 +22,13 @@ pub const STATE_EVENT_CAP: usize = 8;
 pub const STATE_CTRL_CAP: usize = 4;
 pub const OUTQ_BACKPREASSURE_THRESHOLD: usize = 192;
 pub const OUTQ_CAP: usize = 256;
-
-/// String constant for the JSON-RPC version.
 pub const JSONRPC_VERSION: &str = "2.0";
 
 // ---- Type aliases ----
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = StdResult<T, Error>;
 pub type CmdTx = mpsc::Sender<Cmd>;
 pub type CmdRx = mpsc::Receiver<Cmd>;
-pub type WireInTx = mpsc::Sender<WireIn>;
-pub type WireInRx = mpsc::Receiver<WireIn>;
-pub type WireOutTx = mpsc::Sender<WireOut>;
-pub type WireOutRx = mpsc::Receiver<WireOut>;
-pub type RpcReply = oneshot::Sender<Result<RpcResultPayload>>;
 pub type SubscriptionReady = oneshot::Sender<SubscriptionRecv>;
 pub type SubscriptionSender = broadcast::Sender<SubscriptionPayload>;
 pub type SubscriptionRecv = broadcast::Receiver<SubscriptionPayload>;
@@ -45,10 +37,16 @@ pub type SubscriptionRecv = broadcast::Receiver<SubscriptionPayload>;
 * ----  ----
 */
 
+pub type WireInTx = mpsc::Sender<WireIn>;
+pub type WireInRx = mpsc::Receiver<WireIn>;
+
 #[derive(Debug)]
 pub enum WireIn {
     Data(Bytes),
 }
+
+pub type WireOutTx = mpsc::Sender<WireOut>;
+pub type WireOutRx = mpsc::Receiver<WireOut>;
 
 #[derive(Debug)]
 pub enum WireOut {
@@ -176,7 +174,7 @@ impl From<&str> for MethodIdBuf {
 pub struct JsonRpcVer;
 
 impl Serialize for JsonRpcVer {
-    fn serialize<S>(&self, ser: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, ser: S) -> StdResult<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -185,7 +183,7 @@ impl Serialize for JsonRpcVer {
 }
 
 impl<'de> Deserialize<'de> for JsonRpcVer {
-    fn deserialize<D>(de: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(de: D) -> StdResult<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -217,7 +215,7 @@ impl ArrayParams {
         Self(vec![])
     }
 
-    pub fn insert<T: Serialize>(&mut self, v: T) -> std::result::Result<(), serde_json::Error> {
+    pub fn insert<T: Serialize>(&mut self, v: T) -> StdResult<(), serde_json::Error> {
         self.0.push(serde_json::to_value(&v)?);
         Ok(())
     }
@@ -243,7 +241,7 @@ impl ObjectParams {
         &mut self,
         k: impl Into<String>,
         v: T,
-    ) -> std::result::Result<(), serde_json::Error> {
+    ) -> StdResult<(), serde_json::Error> {
         self.0.insert(k.into(), serde_json::to_value(&v)?);
         Ok(())
     }
@@ -267,28 +265,28 @@ impl Params {
 }
 
 pub trait IntoParams {
-    fn into_params(self) -> std::result::Result<Option<Params>, Error>;
+    fn into_params(self) -> Result<Option<Params>>;
 }
 
 impl IntoParams for Params {
-    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
+    fn into_params(self) -> Result<Option<Params>> {
         Ok(Some(self))
     }
 }
 impl IntoParams for () {
-    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
+    fn into_params(self) -> Result<Option<Params>> {
         Ok(None)
     }
 }
 
 impl IntoParams for Option<Params> {
-    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
+    fn into_params(self) -> Result<Option<Params>> {
         Ok(self)
     }
 }
 
 impl IntoParams for Value {
-    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
+    fn into_params(self) -> Result<Option<Params>> {
         Ok(Some(match self {
             Value::Array(a) => Params::Array(a),
             Value::Object(o) => Params::Object(o),
@@ -298,19 +296,19 @@ impl IntoParams for Value {
 }
 
 impl IntoParams for ArrayParams {
-    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
+    fn into_params(self) -> Result<Option<Params>> {
         Ok(Some(Params::Array(self.0)))
     }
 }
 
 impl IntoParams for ObjectParams {
-    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
+    fn into_params(self) -> Result<Option<Params>> {
         Ok(Some(Params::Object(self.0)))
     }
 }
 
 impl<T: Serialize> IntoParams for &T {
-    fn into_params(self) -> std::result::Result<Option<Params>, Error> {
+    fn into_params(self) -> Result<Option<Params>> {
         match serde_json::to_value(self).map_err(Error::Serde)? {
             Value::Array(a) => Ok(Some(Params::Array(a))),
             Value::Object(o) => Ok(Some(Params::Object(o))),
@@ -322,12 +320,23 @@ impl<T: Serialize> IntoParams for &T {
 /*
 * ----  ----
 */
+pub type RpcReply = oneshot::Sender<RpcResult>;
 
 #[derive(Debug)]
-pub struct RpcResultPayload {
+pub struct RpcPayload {
     pub id: RequestIdBuf,
     pub result: JsonSlice,
 }
+
+#[derive(Debug)]
+pub struct RpcError {
+    pub id: RequestIdBuf,
+    pub code: i64,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+pub type RpcResult = StdResult<RpcPayload, RpcError>;
 
 /*
 * ----  ----
