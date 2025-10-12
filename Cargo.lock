@@ -1017,6 +1017,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "pin-project-lite",
+ "slab",
  "tokio",
 ]
 
@@ -1029,6 +1030,7 @@ dependencies = [
  "futures-util",
  "serde",
  "serde_json",
+ "slab",
  "thiserror",
  "tokio",
  "tokio-tungstenite",

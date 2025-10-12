@@ -9,7 +9,7 @@ use std::borrow::Cow;
 #[derive(Serialize, Debug)]
 pub struct RpcRequest<'a> {
     pub jsonrpc: JsonRpcVer,
-    pub id: Cow<'a, RequestId>,
+    pub id: RequestId,
     pub method: Cow<'a, MethodId>,
     pub params: Option<&'a RawValue>,
 }
@@ -31,10 +31,9 @@ pub struct Notification<'a> {
 pub struct RpcResponse<'a> {
     #[expect(dead_code, reason = "Serde-only marker that’s never read in code")]
     pub jsonrpc: JsonRpcVer,
+    pub id: RequestId,
     #[serde(borrow)]
     pub result: &'a RawValue,
-    #[serde(borrow)]
-    pub id: Cow<'a, RequestId>,
 }
 
 // JSONRPC 2.0 Error Object (https://www.jsonrpc.org/specification#error_object)
@@ -43,7 +42,7 @@ pub struct RpcError<'a> {
     #[expect(dead_code, reason = "Serde-only marker that’s never read in code")]
     pub jsonrpc: JsonRpcVer,
     pub error: Error<'a>,
-    pub id: Cow<'a, RequestId>,
+    pub id: RequestId,
 }
 
 // JSONRPC 2.0 Error Object (https://www.jsonrpc.org/specification#error_object)
@@ -67,8 +66,7 @@ pub enum Response<'a> {
 pub struct ResponseAny<'a> {
     #[expect(dead_code, reason = "Serde-only marker that’s never read in code")]
     pub jsonrpc: JsonRpcVer,
-    #[serde(borrow)]
-    pub id: Option<Cow<'a, RequestId>>,
+    pub id: Option<RequestId>,
     #[serde(borrow)]
     pub result: Option<&'a RawValue>,
     #[serde(borrow)]

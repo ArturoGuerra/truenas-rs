@@ -7,8 +7,17 @@ use crate::error::Error;
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::value::{Map, RawValue, Value};
-use std::{borrow::Borrow, ops::Range, result::Result as StdResult};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use std::fmt::{self, Display};
+use std::sync::Arc;
+use std::{
+    borrow::{Borrow, Cow},
+    ops::Range,
+    result::Result as StdResult,
+};
+use tokio::{
+    sync::{broadcast, mpsc, oneshot},
+    time::Duration,
+};
 use uuid::Uuid;
 
 pub const IO_INTERNAL_EVENT_CAP: usize = 64;
@@ -23,6 +32,90 @@ pub const STATE_CTRL_CAP: usize = 4;
 pub const OUTQ_BACKPREASSURE_THRESHOLD: usize = 192;
 pub const OUTQ_CAP: usize = 256;
 pub const JSONRPC_VERSION: &str = "2.0";
+
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct RequestId(u128);
+
+impl RequestId {
+    pub fn new() -> Self {
+        RequestId(Uuid::new_v4().as_u128())
+    }
+}
+
+impl Default for RequestId {
+    fn default() -> Self {
+        RequestId::new()
+    }
+}
+
+impl From<Uuid> for RequestId {
+    fn from(u: Uuid) -> RequestId {
+        RequestId(u.as_u128())
+    }
+}
+
+impl From<RequestId> for Uuid {
+    fn from(r: RequestId) -> Uuid {
+        Uuid::from_u128(r.0)
+    }
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct MethodId(str);
+
+impl MethodId {
+    pub fn new(s: &str) -> &MethodId {
+        unsafe { &*(s as *const str as *const _ as *const MethodId) }
+    }
+}
+
+impl ToOwned for MethodId {
+    type Owned = MethodIdBuf;
+    fn to_owned(&self) -> MethodIdBuf {
+        MethodIdBuf(self.0.to_owned())
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+#[repr(transparent)]
+pub struct MethodIdBuf(String);
+
+impl MethodIdBuf {
+    pub fn new(s: String) -> MethodIdBuf {
+        MethodIdBuf(s)
+    }
+}
+
+impl Borrow<MethodId> for MethodIdBuf {
+    fn borrow(&self) -> &MethodId {
+        MethodId::new(&self.0)
+    }
+}
+
+impl AsRef<MethodId> for MethodIdBuf {
+    fn as_ref(&self) -> &MethodId {
+        MethodId::new(&self.0)
+    }
+}
+
+impl From<String> for MethodIdBuf {
+    fn from(s: String) -> MethodIdBuf {
+        MethodIdBuf::new(s)
+    }
+}
+
+impl From<&str> for MethodIdBuf {
+    fn from(s: &str) -> MethodIdBuf {
+        MethodIdBuf::new(s.to_owned())
+    }
+}
+
+// TODO: Refactor how things are origanized.
 
 // ---- Type aliases ----
 
@@ -51,119 +144,6 @@ pub type WireOutRx = mpsc::Receiver<WireOut>;
 #[derive(Debug)]
 pub enum WireOut {
     Data(Bytes),
-}
-
-/*
-* ----  ----
-*/
-
-#[derive(Debug, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct RequestId(str);
-impl RequestId {
-    fn new(s: &str) -> &RequestId {
-        unsafe { &*(s as *const str as *const RequestId) }
-    }
-}
-impl ToOwned for RequestId {
-    type Owned = RequestIdBuf;
-    fn to_owned(&self) -> RequestIdBuf {
-        RequestIdBuf(self.0.to_owned())
-    }
-}
-
-/*
-*
-*/
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct RequestIdBuf(String);
-impl RequestIdBuf {
-    pub fn new(s: String) -> RequestIdBuf {
-        RequestIdBuf(s)
-    }
-}
-impl Borrow<RequestId> for RequestIdBuf {
-    fn borrow(&self) -> &RequestId {
-        RequestId::new(&self.0)
-    }
-}
-impl AsRef<RequestId> for RequestIdBuf {
-    fn as_ref(&self) -> &RequestId {
-        RequestId::new(&self.0)
-    }
-}
-impl From<String> for RequestIdBuf {
-    fn from(s: String) -> RequestIdBuf {
-        RequestIdBuf(s)
-    }
-}
-impl From<&str> for RequestIdBuf {
-    fn from(s: &str) -> RequestIdBuf {
-        RequestIdBuf(s.to_owned())
-    }
-}
-impl From<Uuid> for RequestIdBuf {
-    fn from(uuid: Uuid) -> RequestIdBuf {
-        RequestIdBuf(uuid.to_string())
-    }
-}
-
-/*
-*
-*/
-
-#[derive(Debug, Eq, Hash, PartialEq, Serialize)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct MethodId(str);
-impl MethodId {
-    fn new(s: &str) -> &MethodId {
-        unsafe { &*(s as *const str as *const MethodId) }
-    }
-}
-impl ToOwned for MethodId {
-    type Owned = MethodIdBuf;
-    fn to_owned(&self) -> MethodIdBuf {
-        MethodIdBuf(self.0.to_owned())
-    }
-}
-
-/*
-*
-*/
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-#[serde(transparent)]
-#[repr(transparent)]
-pub struct MethodIdBuf(String);
-impl MethodIdBuf {
-    pub fn new(s: String) -> MethodIdBuf {
-        MethodIdBuf(s)
-    }
-}
-impl Borrow<MethodId> for MethodIdBuf {
-    fn borrow(&self) -> &MethodId {
-        MethodId::new(&self.0)
-    }
-}
-impl AsRef<MethodId> for MethodIdBuf {
-    fn as_ref(&self) -> &MethodId {
-        MethodId::new(&self.0)
-    }
-}
-impl From<String> for MethodIdBuf {
-    fn from(s: String) -> MethodIdBuf {
-        MethodIdBuf(s)
-    }
-}
-impl From<&str> for MethodIdBuf {
-    fn from(s: &str) -> MethodIdBuf {
-        MethodIdBuf(s.to_owned())
-    }
 }
 
 /*
@@ -324,13 +304,13 @@ pub type RpcReply = oneshot::Sender<RpcResult>;
 
 #[derive(Debug)]
 pub struct RpcPayload {
-    pub id: RequestIdBuf,
+    pub id: RequestId,
     pub result: JsonSlice,
 }
 
 #[derive(Debug)]
 pub struct RpcError {
-    pub id: RequestIdBuf,
+    pub id: RequestId,
     pub code: i64,
     pub message: String,
     pub data: Option<Value>,
@@ -351,10 +331,11 @@ pub struct SubscriptionPayload(pub Option<JsonSlice>);
 
 pub enum Cmd {
     Call {
-        id: RequestIdBuf,
+        id: RequestId,
         method: MethodIdBuf,
         params: Option<Params>,
         reply: RpcReply,
+        timeout: Duration,
     },
 
     Notification {
