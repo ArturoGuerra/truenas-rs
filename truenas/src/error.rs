@@ -1,4 +1,4 @@
-use crate::types::RequestIdBuf;
+use crate::types::{RequestId, RpcError};
 use serde_json::value::RawValue;
 use std::error::Error as StdError;
 use tokio::sync::oneshot;
@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 pub enum Error {
     #[error("protocol error code={code} message={message}")]
     Protocol {
-        id: RequestIdBuf,
+        id: RequestId,
         code: i64,
         message: String,
         data: Option<Box<RawValue>>,
@@ -26,6 +26,17 @@ pub enum Error {
     Serde(#[from] serde_json::Error),
     #[error("transport: {0}")]
     Transport(#[from] Box<dyn StdError + Send + Sync>),
+}
+
+impl From<RpcError> for Error {
+    fn from(e: RpcError) -> Error {
+        Error::Protocol {
+            id: e.id,
+            code: e.code,
+            message: e.message,
+            data: e.data,
+        }
+    }
 }
 
 impl Error {

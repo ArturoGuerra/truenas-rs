@@ -120,14 +120,12 @@ impl From<&str> for MethodIdBuf {
 // ---- Type aliases ----
 
 pub type Result<T> = StdResult<T, Error>;
-pub type CmdTx = mpsc::Sender<Cmd>;
-pub type CmdRx = mpsc::Receiver<Cmd>;
 pub type SubscriptionReady = oneshot::Sender<SubscriptionRecv>;
 pub type SubscriptionSender = broadcast::Sender<SubscriptionPayload>;
 pub type SubscriptionRecv = broadcast::Receiver<SubscriptionPayload>;
 
 /*
-* ----  ----
+* ---- Use to communicate between the IO and State tasks ----
 */
 
 pub type WireInTx = mpsc::Sender<WireIn>;
@@ -313,7 +311,7 @@ pub struct RpcError {
     pub id: RequestId,
     pub code: i64,
     pub message: String,
-    pub data: Option<Value>,
+    pub data: Option<Box<RawValue>>,
 }
 
 pub type RpcResult = StdResult<RpcPayload, RpcError>;
@@ -326,8 +324,10 @@ pub type RpcResult = StdResult<RpcPayload, RpcError>;
 pub struct SubscriptionPayload(pub Option<JsonSlice>);
 
 /*
-* ----  ----
+* ---- Used to communicate from the main thread to the state task ----
 */
+pub type CmdTx = mpsc::Sender<Cmd>;
+pub type CmdRx = mpsc::Receiver<Cmd>;
 
 pub enum Cmd {
     Call {

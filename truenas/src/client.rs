@@ -4,25 +4,35 @@ use crate::state::StateTask;
 use crate::transport::Transport;
 use crate::types::{
     CMD_CHANNEL_CAP, Cmd, CmdRx, CmdTx, IO_CTRL_CAP, IO_EVENT_CAP, IntoParams, MethodIdBuf,
-    OUTQ_BACKPREASSURE_THRESHOLD, OUTQ_CAP, RequestId, RequestIdBuf, Result, STATE_CTRL_CAP,
-    STATE_EVENT_CAP, SubscriptionRecv, SubscriptionSender, WIRE_IN_CAP, WIRE_OUT_CAP, WireIn,
-    WireOut,
+    RequestId, Result, RpcPayload, STATE_CTRL_CAP, STATE_EVENT_CAP, SubscriptionRecv, WIRE_IN_CAP,
+    WIRE_OUT_CAP,
 };
-use futures::Stream;
 use serde::de::DeserializeOwned;
 use std::borrow::Borrow;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::{self, JoinHandle};
-use tokio::time;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct Response<T: DeserializeOwned> {
-    pub id: RequestIdBuf,
+    pub id: RequestId,
     pub result: T,
+}
+
+impl<T> TryFrom<RpcPayload> for Response<T>
+where
+    T: DeserializeOwned,
+{
+    type Error = Error;
+    fn try_from(rpc_payload: RpcPayload) -> Result<Response<T>> {
+        Ok(Response {
+            id: rpc_payload.id,
+            result: rpc_payload.result.deserialize_owned()?,
+        })
+    }
 }
 
 impl<T> Response<T>
@@ -33,17 +43,8 @@ where
         self.result
     }
 
-    pub fn id(&self) -> &RequestId {
-        self.id.as_ref()
-    }
-}
-
-impl<T> AsRef<RequestId> for Response<T>
-where
-    T: DeserializeOwned,
-{
-    fn as_ref(&self) -> &RequestId {
-        self.id.as_ref()
+    pub fn id(&self) -> RequestId {
+        self.id
     }
 }
 
@@ -87,7 +88,7 @@ where
         self.recv.take();
 
         self.cmd
-            .send(Cmd::Unsubscribe {
+            .blocking_send(Cmd::Unsubscribe {
                 method: self.method.take().unwrap(),
             })
             .unwrap();
@@ -119,8 +120,9 @@ pub struct Client {
     conn_state: watch::Receiver<ConnState>,
     health: watch::Receiver<Health>,
     sup_handle: Arc<Mutex<Option<JoinHandle<Result<()>>>>>,
-    reconnect_backoff: u64,
-    ping_interval: u64,
+    reconnect_backoff: Duration,
+    ping_interval: Duration,
+    default_request_timeout: Duration,
 }
 
 #[derive(Debug)]
@@ -158,8 +160,9 @@ impl Client {
             conn_state: conn_state_rx,
             health: health_rx,
             sup_handle: Arc::new(Mutex::new(Some(sup_handle))),
-            reconnect_backoff: 60,
-            ping_interval: 10,
+            reconnect_backoff: Duration::from_secs(60),
+            ping_interval: Duration::from_secs(10),
+            default_request_timeout: Duration::from_secs(20),
         })
     }
 
@@ -223,27 +226,39 @@ impl Client {
         T: DeserializeOwned,
         P: IntoParams,
     {
+        self.call_with_timeout(method, params, self.default_request_timeout)
+            .await
+    }
+
+    pub async fn call_with_timeout<T, P>(
+        &self,
+        method: MethodIdBuf,
+        params: P,
+        timeout: Duration,
+    ) -> Result<Response<T>>
+    where
+        T: DeserializeOwned,
+        P: IntoParams,
+    {
         let id = Uuid::new_v4();
         let (tx, rx) = oneshot::channel();
         let cmd = Cmd::Call {
             id: id.into(),
             method,
             params: params.into_params()?,
+            timeout,
             reply: tx,
         };
 
         self.cmd
             .send(cmd)
+            .await
             .map_err(|e| Error::TokioSend(e.to_string()))?;
 
         rx.await
             .map_err(Error::TokioOneshotRecv)?
-            .and_then(|payload| {
-                Ok(Response {
-                    id: payload.id,
-                    result: payload.result.deserialize_owned::<T>()?,
-                })
-            })
+            .map_err(Error::from)
+            .and_then(Response::try_from)
     }
 
     pub async fn notification<P>(&self, method: MethodIdBuf, params: P) -> Result<()>
@@ -257,6 +272,7 @@ impl Client {
 
         self.cmd
             .send(cmd)
+            .await
             .map_err(|e| Error::TokioSend(e.to_string()))
     }
 
@@ -272,6 +288,7 @@ impl Client {
 
         self.cmd
             .send(cmd)
+            .await
             .map_err(|e| Error::TokioSend(e.to_string()))?;
 
         Ok(Subscription {
