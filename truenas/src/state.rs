@@ -83,7 +83,7 @@ impl PendingCalls {
 
 pub(crate) struct StateTask {
     pending_calls: PendingCalls,
-    method_subscriptions: HashMap<MethodIdBuf, SubscriptionSender>,
+    subscriptions: HashMap<MethodIdBuf, SubscriptionSender>,
 
     cancel: CancellationToken,
     cmd_rx: CmdRx,
@@ -104,7 +104,7 @@ impl StateTask {
     ) -> Self {
         Self {
             pending_calls: PendingCalls::default(),
-            method_subscriptions: HashMap::new(),
+            subscriptions: HashMap::new(),
             cancel,
             cmd_rx,
             data_tx,
@@ -121,6 +121,7 @@ impl StateTask {
             select! {
                 _ = self.cancel.cancelled() => break,
                 Some(read) = self.data_rx.recv() => self.reader(read).await?,
+                Some(cmd) = self.cmd_rx.recv() => self.writer(cmd).await?,
                 Some(expired) = self.pending_calls.timers.next() => {
                     self.pending_calls.remove(&expired.into_inner());
                 }
@@ -131,28 +132,32 @@ impl StateTask {
         Ok(())
     }
 
+    pub(crate) async fn writer(&mut self, cmd: Cmd) -> Result<(), Error> {
+        Ok(())
+    }
+
     async fn reader(&mut self, data: WireIn) -> Result<(), Error> {
         println!("Handling read!");
 
         match data {
             WireIn::Data(bytes) => {
                 let root = std::str::from_utf8(&bytes).map_err(Error::Utf8)?;
-                match serde_json::from_slice::<ResponseAny>(&bytes)
-                    .map(Response::try_from)
-                    .flatten()
-                {
+                match serde_json::from_slice::<ResponseAny>(&bytes).and_then(Response::try_from) {
                     Ok(resp) => match resp {
                         Response::RpcResponse(resp) => {
                             match self.pending_calls.remove(&resp.id) {
                                 Some(sender) => {
-                                    if let Err(_) = sender.send(Ok(RpcPayload {
-                                        id: resp.id,
-                                        result: JsonSlice::from_raw(
-                                            bytes.clone(),
-                                            root,
-                                            resp.result,
-                                        ),
-                                    })) {
+                                    if sender
+                                        .send(Ok(RpcPayload {
+                                            id: resp.id,
+                                            result: JsonSlice::from_raw(
+                                                bytes.clone(),
+                                                root,
+                                                resp.result,
+                                            ),
+                                        }))
+                                        .is_err()
+                                    {
                                         //TODO: Log dropped callback channel.
                                     }
                                 }
@@ -161,16 +166,30 @@ impl StateTask {
                                 }
                             }
                         }
-                        Response::Notification(notification) => {}
+                        Response::Notification(notification) => {
+                            match self.subscriptions.get_mut(notification.method.as_ref()) {
+                                Some(sender) => {
+                                    if sender.send(notification.into()).is_err() {
+                                        // TODO: Log sender issues.
+                                    }
+                                }
+                                None => {
+                                    // TODO: Log Invalid subscription.
+                                }
+                            }
+                        }
                         Response::RpcError(err) => {
                             match self.pending_calls.remove(&err.id) {
                                 Some(sender) => {
-                                    if let Err(_) = sender.send(Err(RpcError {
-                                        id: err.id,
-                                        code: err.error.code,
-                                        message: err.error.message.to_string(),
-                                        data: None,
-                                    })) {
+                                    if sender
+                                        .send(Err(RpcError {
+                                            id: err.id,
+                                            code: err.error.code,
+                                            message: err.error.message.to_string(),
+                                            data: err.error.data.map(|data| data.into_owned()),
+                                        }))
+                                        .is_err()
+                                    {
                                         //TODO: Log dropped sender.
                                     }
                                 }

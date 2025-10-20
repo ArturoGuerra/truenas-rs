@@ -4,6 +4,7 @@
 */
 
 use crate::error::Error;
+use crate::protocol::Notification;
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::value::{Map, RawValue, Value};
@@ -321,7 +322,13 @@ pub type RpcResult = StdResult<RpcPayload, RpcError>;
 */
 
 #[derive(Debug)]
-pub struct SubscriptionPayload(pub Option<JsonSlice>);
+pub struct SubscriptionPayload(pub Option<Box<RawValue>>);
+
+impl<'a> From<Notification<'a>> for SubscriptionPayload {
+    fn from(n: Notification<'a>) -> SubscriptionPayload {
+        SubscriptionPayload(n.params.map(|p| p.to_owned()))
+    }
+}
 
 /*
 * ---- Used to communicate from the main thread to the state task ----
